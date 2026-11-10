@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Empaqueta un overlay MWo3 (TBL/XXXMOD.BIN) como ELF32 MIPS minimo para PS2Recomp.
-Uso: make_overlay_elf.py MOD.BIN ASM_TEXT.s SALIDA.elf PREFIJO
+Uso: make_overlay_elf.py MOD.BIN ASM_TEXT.s SALIDA.elf PREFIJO [SYMS.txt]
 - MWo3: u32 +8 = direccion de carga, +0xC = tamano de .text; el fichero entero se carga en `load`; el codigo empieza en load+0x80.
 - Simbolos y tamanos salen del desensamblado del decomp (`glabel` + `nonmatching nombre, tam`)."""
 import re, struct, sys
 binp, asmp, out, pre = sys.argv[1:5]
+symp = sys.argv[5] if len(sys.argv) > 5 else None
 d = open(binp, 'rb').read()
 assert d[:4] == b'MWo3'
 load, tsize, dsize, bss = struct.unpack_from('<4I', d, 8)
@@ -18,6 +19,16 @@ for i, l in enumerate(lines):
         for l2 in lines[i+1:i+8]:
             mm = re.match(r'\s*/\* [0-9A-Fa-f]+ ([0-9A-Fa-f]{8}) ', l2)
             if mm: funcs.append((m.group(1), int(mm.group(1), 16))); break
+# Codigo que vive en la seccion de datos (p. ej. __sinit_*.cc, thunks): se toma de config/ov_<mod>_syms.txt
+extra_end = 0
+if symp:
+    have = {a for _, a in funcs}
+    text_end = load + 0x80 + tsize
+    for l in open(symp):
+        m = re.match(r'(\S+) = (0x[0-9A-Fa-f]+); // type:func size:(0x[0-9A-Fa-f]+)', l)
+        if m and int(m.group(2), 16) >= text_end and int(m.group(2), 16) not in have:
+            a = int(m.group(2), 16); sizes[m.group(1)] = int(m.group(3), 16)
+            funcs.append((m.group(1), a)); extra_end = max(extra_end, a + sizes[m.group(1)])
 strtab = b'\0'; syms = [b'\0' * 16]
 for n, a in funcs:
     sz = sizes.get(n, 4)
@@ -27,6 +38,8 @@ shstr = b'\0.text\0.data\0.symtab\0.strtab\0.shstrtab\0'
 nm = lambda s: shstr.index(s.encode())
 DOFF = 0x100
 text_a = load + 0x80
+xt = max(0, extra_end - (text_a + tsize))   # bytes de datos que en realidad son codigo
+tsize += xt; dsize -= xt
 data_a = text_a + tsize
 body = d
 symtab = b''.join(syms)

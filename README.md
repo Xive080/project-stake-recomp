@@ -34,3 +34,10 @@ Resultado: `build/stake/stake_recomp` enlaza en macOS arm64 (sse2neon, sin FFmpe
 Primer arranque (`stake_recomp <elf>`): carga el ELF, abre ventana y audio y ejecuta `PowerOnInit`. El juego se quedaba en `nlDmaSendToMFifo`
 esperando a que VIF1 consumiera el anillo MFIFO; `patches/ps2recomp-mfifo-vif1.patch` lo implementa (SPR->anillo con RBSR/RBOR y VIF1 lee los tags hasta MADR).
 Con el parche el juego avanza y sube frames. Pendiente: ver que dibuja (GS/VU1), CDVD/AFS, audio, pad.
+
+### Hallazgos al arrancar (2026-11-10)
+- El disco hay que extraerlo **completo** junto al ELF (`bsdtar -xf <iso>`): el juego pide `0CFLIST.DIR`, `FS/SYS/*.IRX`, `FS/SND/*` ademas de `MOD/` y `TBL/`. El runtime toma la raiz del CD de la carpeta del ELF, asi que se lanza con `stake_recomp <disco>/SCES_504.11`.
+- Los overlays tienen codigo dentro de su seccion de datos (`__sinit_*.cc`, thunks `@..__dt__`): `make_overlay_elf.py` ahora los toma de `config/ov_<mod>_syms.txt` y amplia `.text` para cubrirlos.
+- gamemod y optmod comparten la ventana 0x92B000: el modulo activo se distingue por el idx de la cabecera MWo3 (+4).
+- `patches/ps2recomp-dma-recvn.patch`: implementa `sceDmaRecvN` (el juego salia con "Unimplemented PS2 stub").
+- Estado del primer arranque: tras la espera de `guncon2_init` (~70 s en este build; es un delay por cuenta) el juego llega a `mwPlySwitchToIdle` (Sofdec, 0x18e3d8) y espera al decodificador de video. Ventana aun negra. Siguiente: IPU/MPEG (FFmpeg esta desactivado en este build) o saltar la pelicula de arranque.

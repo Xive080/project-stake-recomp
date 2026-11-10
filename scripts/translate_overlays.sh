@@ -8,7 +8,7 @@ for bin in "$DISC"/TBL/*MOD.BIN; do
   m=$(basename "$bin" .BIN | tr 'A-Z' 'a-z')
   asm="$DEC/asm/$m/${m}_text.s"; [ -f "$asm" ] || { echo "$m: sin asm"; continue; }
   d=work/ov/$m; mkdir -p $d
-  python3 scripts/make_overlay_elf.py "$bin" "$asm" $d/$m.elf $m
+  python3 scripts/make_overlay_elf.py "$bin" "$asm" $d/$m.elf $m "$DEC/config/ov_${m}_syms.txt"
   $B/ps2xAnalyzer/ps2_analyzer $d/$m.elf $d/$m.toml >/dev/null 2>&1
   sed -i.bak "s#^output = .*#output = \"$d/output/\"#" $d/$m.toml
   $B/ps2xRecomp/ps2_recomp $d/$m.toml > $d/run.log 2>&1 || true
