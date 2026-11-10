@@ -44,6 +44,7 @@ add_executable(stake_recomp
   "${PS2R}/ps2xRuntime/src/main.cpp"
   ${MAIN_SRC}
   "${GEN}/overlay_registry.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/stake_overrides.cpp"
   ${OV_OBJS})
 target_include_directories(stake_recomp PRIVATE "${GEN}/output2")
 target_link_libraries(stake_recomp PRIVATE ps2_runtime)

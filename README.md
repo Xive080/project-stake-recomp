@@ -41,3 +41,6 @@ Con el parche el juego avanza y sube frames. Pendiente: ver que dibuja (GS/VU1),
 - gamemod y optmod comparten la ventana 0x92B000: el modulo activo se distingue por el idx de la cabecera MWo3 (+4).
 - `patches/ps2recomp-dma-recvn.patch`: implementa `sceDmaRecvN` (el juego salia con "Unimplemented PS2 stub").
 - Estado del primer arranque: tras la espera de `guncon2_init` (~70 s en este build; es un delay por cuenta) el juego llega a `mwPlySwitchToIdle` (Sofdec, 0x18e3d8) y espera al decodificador de video. Ventana aun negra. Siguiente: IPU/MPEG (FFmpeg esta desactivado en este build) o saltar la pelicula de arranque.
+- `runner/stake_overrides.cpp` (mecanismo `PS2_REGISTER_GAME_OVERRIDE`, como en otros proyectos de PS2Recomp): `ADXM_WaitVsync` (0x16D690) se sustituye por una espera de 16 ms porque el runtime no entrega aun la interrupcion de vsync al hilo de ADX.
+  Con eso el juego sale de la pelicula de arranque y corre su bucle principal (`ps2_main`, `Synch__Fv` una vez por fotograma), pero la ventana sigue negra.
+- Diagnostico de la pantalla negra: `gif` se queda en 130 mientras `dma` sube; en el flujo VIF1 aparecen `MSCAL` con pc imposibles (>0x4000) y ningun `MPG`. Hipotesis: los microprogramas de VU1 no se cargan, o el flujo VIF1 (UNPACK/tags con TTE) se desalinea. Siguiente: volcar el flujo VIF1 de un fotograma y compararlo con PCSX2.
