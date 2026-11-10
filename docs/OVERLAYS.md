@@ -24,3 +24,6 @@ Pendiente de comprobar: como detecta el juego el cambio de overlay (llamadas a `
 Conclusion: el punto de enganche del runtime es `mwOverlayInit(addr, size)`. El `idx` del modulo esta en la cabecera MWo3 (u32 en +4), asi que basta leer `addr+4` de la memoria guest y activar el modulo cuya tabla corresponde.
 
 Indices (cabecera MWo3, coinciden con la tabla 0x2D8070): 1 gamemod 0x92B000; 2 hntmod 0x9C4800; 3 optmod 0x92B000; 4..8 bs2mod..bs6mod 0x9C4800; 9 shpmod 0x9C4800; 10 aomod 0x9DF000; 11 acmod 0xA0F800; 12 orgmod 0xA0F800; 13 trnmod 0x9DF000.
+
+## Tablas por modulo (hecho)
+`scripts/prefix_tables.py` renombra en cada `work/ov/<mod>/output/register_functions.cpp` la tabla `g_ps2RecompiledFunctionTable*` a `g_<mod>_FuncTable*` (si no, 13 modulos definen el mismo simbolo) y genera `overlay_registry.cpp` con `g_overlayTables[]` = {idx, nombre, base, fin, tabla}, el idx leido de la cabecera MWo3 (variable de entorno `DISC`). Los 13 modulos salen con su idx (1..13). Falta: que `lookupFunction` use esa tabla para direcciones >= 0x92B000 segun el modulo activo de la ventana.
