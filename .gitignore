@@ -4,3 +4,4 @@ disc/
 build/
 *.elf
 .DS_Store
+third_party/
