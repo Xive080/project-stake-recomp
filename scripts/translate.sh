@@ -15,4 +15,9 @@ B=build/ps2recomp
 mkdir -p work; cp "$ELF" work/game.elf
 $B/ps2xAnalyzer/ps2_analyzer work/game.elf work/game.toml
 $B/ps2xRecomp/ps2_recomp work/game.toml > work/run.log 2>&1 || true
-echo "errores: $(grep -c '\[error\]' work/run.log)"
+echo "primera pasada, errores: $(grep -c '\[error\]' work/run.log)"
+# segunda pasada: las funciones con error son datos tomados por codigo; se saltan
+grep '\[error\]' work/run.log | sed -E 's/.*function=([^ ]+).*/\1/' | sort -u > work/errfuncs.txt
+python3 scripts/make_skip.py work/game.toml work/errfuncs.txt work/game_skip.toml
+$B/ps2xRecomp/ps2_recomp work/game_skip.toml > work/run2.log 2>&1 || true
+echo "segunda pasada, errores: $(grep -c '\[error\]' work/run2.log)"
