@@ -24,3 +24,13 @@ Reproducir: `scripts/translate.sh RUTA/AL/SCES_504.11`.
 - Traducido: 4 592 funciones del ejecutable principal + 2 850 de los 13 overlays, 0 errores tras saltar las areas de datos.
 - Hecho: tablas por modulo (`scripts/prefix_tables.py`), parche de lookup de overlays para el runtime (`patches/`).
 - Falta: compilar el runtime con el parche, enlazar y llegar a `main`; despues GS/VU1/DMA, audio y entrada. Detalle en `docs/OVERLAYS.md`.
+
+## Build del runner (estado)
+
+`runner/CMakeLists.txt` compila el runtime de PS2Recomp (dependencia externa en `third_party/`) junto con el codigo generado
+del ejecutable principal y de los 13 overlays (un objeto por modulo) y `work/overlay_registry.cpp`.
+Resultado: `build/stake/stake_recomp` enlaza en macOS arm64 (sse2neon, sin FFmpeg). Si se regeneran los overlays hay que repetir
+`DISC=<disc> python3 scripts/prefix_tables.py work/ov work/overlay_registry.cpp` antes de compilar.
+Primer arranque (`stake_recomp <elf>`): carga el ELF, abre ventana y audio y ejecuta `PowerOnInit`. El juego se quedaba en `nlDmaSendToMFifo`
+esperando a que VIF1 consumiera el anillo MFIFO; `patches/ps2recomp-mfifo-vif1.patch` lo implementa (SPR->anillo con RBSR/RBOR y VIF1 lee los tags hasta MADR).
+Con el parche el juego avanza y sube frames. Pendiente: ver que dibuja (GS/VU1), CDVD/AFS, audio, pad.
