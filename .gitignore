@@ -1,0 +1,6 @@
+generated/
+baserom/
+disc/
+build/
+*.elf
+.DS_Store
