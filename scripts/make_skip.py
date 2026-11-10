@@ -6,5 +6,5 @@ names = [l.strip() for l in open(errs) if l.strip()]
 s = open(toml).read()
 assert 'skip = []' in s
 s = s.replace('skip = []', 'skip = [\n' + ',\n'.join(f'  "{n}"' for n in names) + '\n]', 1)
-s = s.replace('work/output/', 'work/output2/')
+s = s.replace('work/output/', 'work/output2/') if 'work/output2' not in s and 'output/' in s and '/ov/' not in s else s
 open(out, 'w').write(s)

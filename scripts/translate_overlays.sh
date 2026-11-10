@@ -12,5 +12,12 @@ for bin in "$DISC"/TBL/*MOD.BIN; do
   $B/ps2xAnalyzer/ps2_analyzer $d/$m.elf $d/$m.toml >/dev/null 2>&1
   sed -i.bak "s#^output = .*#output = \"$d/output/\"#" $d/$m.toml
   $B/ps2xRecomp/ps2_recomp $d/$m.toml > $d/run.log 2>&1 || true
+  # segunda pasada: funciones con error = datos tomados por codigo (p. ej. cadenas ASCII); se saltan
+  if grep -q '\[error\]' $d/run.log; then
+    grep '\[error\]' $d/run.log | sed -E 's/.*function=([^ ]+).*/\1/' | sort -u > $d/errfuncs.txt
+    python3 scripts/make_skip.py $d/$m.toml $d/errfuncs.txt $d/${m}_skip.toml
+    sed -i.bak "s#^output = .*#output = \"$d/output/\"#" $d/${m}_skip.toml
+    $B/ps2xRecomp/ps2_recomp $d/${m}_skip.toml > $d/run.log 2>&1 || true
+  fi
   echo "$m: errores=$(grep -c '\[error\]' $d/run.log) ficheros=$(ls $d/output | wc -l)"
 done
