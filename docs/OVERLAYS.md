@@ -27,3 +27,9 @@ Indices (cabecera MWo3, coinciden con la tabla 0x2D8070): 1 gamemod 0x92B000; 2 
 
 ## Tablas por modulo (hecho)
 `scripts/prefix_tables.py` renombra en cada `work/ov/<mod>/output/register_functions.cpp` la tabla `g_ps2RecompiledFunctionTable*` a `g_<mod>_FuncTable*` (si no, 13 modulos definen el mismo simbolo) y genera `overlay_registry.cpp` con `g_overlayTables[]` = {idx, nombre, base, fin, tabla}, el idx leido de la cabecera MWo3 (variable de entorno `DISC`). Los 13 modulos salen con su idx (1..13). Falta: que `lookupFunction` use esa tabla para direcciones >= 0x92B000 segun el modulo activo de la ventana.
+
+## Simplificacion: no hace falta enganchar `mwOverlayInit`
+Al cargarse el fichero entero en la ventana (cabecera incluida), el idx del modulo esta siempre en memoria guest en `ventana+4`. Basta con que `lookupFunction` y `hasFunction` lo lean: si la direccion cae por encima de 0x92B000 se elige la ventana (la mayor base <= direccion), se lee el idx y se usa la tabla de ese modulo. Si el modulo se sustituye, la cabecera cambia sola; si la ventana esta vacia, el idx no casa y la direccion se trata como funcion ausente.
+
+Parche: `patches/ps2recomp-overlay-lookup.patch` (78 lineas, sobre `ps2xRuntime/src/lib/ps2_runtime.cpp`; `git apply --check` limpio sobre el clon actual). Usa `g_overlayTables` de `overlay_registry.cpp` (declarada `weak` para que el runtime enlace tambien sin overlays). Sin compilar todavia.
+Licencia: el parche es una modificacion de codigo GPL-3.0 de PS2Recomp; se publica aparte, con esa licencia, y no se mezcla con codigo propio.
