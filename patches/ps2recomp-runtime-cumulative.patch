@@ -3490,7 +3490,7 @@ index 0000000..d458d08
 +#undef VLC_ALIGNED16
 \ No newline at end of file
 diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
-index 37b6a4d..960a2b6 100644
+index 37b6a4d..117fe30 100644
 --- a/ps2xRuntime/src/lib/ps2_memory.cpp
 +++ b/ps2xRuntime/src/lib/ps2_memory.cpp
 @@ -2,6 +2,7 @@
@@ -3569,6 +3569,15 @@ index 37b6a4d..960a2b6 100644
          return true;
      }
  
+@@ -1229,7 +1233,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+             {
+                 const bool wasPath3Masked = m_path3Masked;
+                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
+-                m_vif1PendingPath2ImageQwc = 0u;
++                            m_vif1PendingPath2ImageQwc = 0u;
+                 m_vif1PendingPath2DirectHl = false;
+                 m_path3Masked = false;
+                 if (wasPath3Masked)
 @@ -1310,6 +1314,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
              {
                  return true;
@@ -4334,19 +4343,54 @@ index f872edd..d2f0d23 100644
  
              pos += qwCount * 16;
 diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
-index f19e281..a178f15 100644
+index f19e281..98accd6 100644
 --- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
 +++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
-@@ -13,6 +13,8 @@
+@@ -13,6 +13,9 @@
  #include <filesystem>
  #include <limits>
  #include <ps2_log.h>
 +#include <chrono>
++
 +namespace { struct Vu1Diag { unsigned long exec=0, resume=0, budget=0, stopped=0, kstart=0, kfin=0, kbytes=0, ended=0; unsigned pcs[8]={}; unsigned npcs=0; } g_vu1diag; }
  
  namespace
  {
-@@ -919,6 +921,21 @@ void VU1Interpreter::finishXgkick()
+@@ -890,6 +893,33 @@ void VU1Interpreter::progressXgkick()
+ 
+             if (tagBytes > XgkickPipeline::kBufferSize - qwordOffset)
+             {
++                {
++                    static const bool diag = std::getenv("VN_VU1STAT") != nullptr;
++                    static unsigned long nOv = 0;
++                    if (diag && ++nOv <= 40)
++                    {
++                        uint64_t hi = 0;
++                        std::memcpy(&hi, m_xgkick.packet.data() + qwordOffset + 8, 8);
++                        std::fprintf(stderr, "[XGKICK-OV] src=%x off=%u tag=%016llx %016llx tagBytes=%llu pc=%x\n",
++                                     m_xgkick.sourceAddress, qwordOffset, (unsigned long long)tagLo,
++                                     (unsigned long long)hi, (unsigned long long)tagBytes, m_state.pc);
++                        std::fprintf(stderr, "   vi:");
++                        for (int r = 0; r < 16; ++r) std::fprintf(stderr, " %x", (unsigned)(uint16_t)m_state.vi[r]);
++                        std::fprintf(stderr, " top=%x itop=%x issue=%llu now=%llu\n", m_state.top, m_state.itop,
++                                     (unsigned long long)m_xgkick.issueCycle, (unsigned long long)m_cycle);
++                        if (const char *dir = std::getenv("VN_VU1DUMP"))
++                        {
++                            char path[1024];
++                            std::snprintf(path, sizeof(path), "%s/ov_%03lu.bin", dir, nOv);
++                            if (FILE *f = std::fopen(path, "wb")) { std::fwrite(m_activeVuData, 1, m_activeVuDataSize, f); std::fclose(f); }
++                        }
++                        for (uint32_t o = 0; o < qwordOffset && o < 256u; o += 16)
++                        {
++                            uint64_t a, b; std::memcpy(&a, m_xgkick.packet.data() + o, 8); std::memcpy(&b, m_xgkick.packet.data() + o + 8, 8);
++                            std::fprintf(stderr, "   +%04x %016llx %016llx\n", o, (unsigned long long)a, (unsigned long long)b);
++                        }
++                    }
++                }
+                 reportReservedInstruction(false, 0xFFFFFFFBu);
+                 m_xgkick.active = false;
+                 return;
+@@ -919,6 +949,21 @@ void VU1Interpreter::finishXgkick()
      if (!m_xgkick.active)
          return;
  
@@ -4368,7 +4412,7 @@ index f19e281..a178f15 100644
      if (m_activeMemory)
          m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
      else if (m_activeGs)
-@@ -932,6 +949,7 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
+@@ -932,6 +977,7 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
          return;
  
      const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
@@ -4376,7 +4420,7 @@ index f19e281..a178f15 100644
      m_xgkick = {};
      m_xgkick.active = true;
      m_xgkick.sourceAddress = sourceAddress;
-@@ -1590,6 +1608,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
+@@ -1590,6 +1636,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                               uint32_t startPC, uint32_t top, uint32_t itop,
                               uint32_t maxCycles)
  {
@@ -4389,7 +4433,7 @@ index f19e281..a178f15 100644
      resetScheduler();
      m_state.pc = startPC & microAddressMask();
      m_state.ebit = false;
-@@ -1605,7 +1629,43 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
+@@ -1605,7 +1657,43 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
      m_state.vf[0][1] = 0.0f;
      m_state.vf[0][2] = 0.0f;
      m_state.vf[0][3] = 1.0f;
@@ -4433,7 +4477,7 @@ index f19e281..a178f15 100644
  }
  
  void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
-@@ -1835,4 +1895,30 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+@@ -1835,4 +1923,30 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
      m_state.cycles = m_cycle;
      if (useVuRounding && previousRoundingMode != -1)
          std::fesetround(previousRoundingMode);
@@ -4464,6 +4508,34 @@ index f19e281..a178f15 100644
 +        }
 +    }
  }
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
+index 94be789..8c62d6e 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
+@@ -283,8 +283,13 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
+     }
+     case 0x24: // JR
+     {
++        // JR/JALR read the current VI value: the "branch sees the VI value from
++        // before the previous integer op" quirk only applies to conditional
++        // branches (PCSX2 microVU applies it in mVUanalyzeCondBranch only).
++        // Vampire Night's VU1 jump table (iaddiu vi01, vi01, 0x40a; jr vi01)
++        // depends on this.
+         uint8_t is = VIS(instr);
+-        uint32_t target = ((uint32_t)(uint16_t)readBranchVi(is) * 8u) & pcMask;
++        uint32_t target = ((uint32_t)(uint16_t)(is == 0u ? 0 : m_state.vi[is]) * 8u) & pcMask;
+         m_state.branchPending = true;
+         m_state.branchTarget = target;
+         m_state.branchDelay = 1;
+@@ -294,7 +299,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
+     {
+         uint8_t it = VIT(instr);
+         uint8_t is = VIS(instr);
+-        uint32_t target = ((uint32_t)(uint16_t)readBranchVi(is) * 8u) & pcMask;
++        uint32_t target = ((uint32_t)(uint16_t)(is == 0u ? 0 : m_state.vi[is]) * 8u) & pcMask;
+         if (it != 0)
+             m_state.vi[it] = (int32_t)((m_state.pc + 16) / 8);
+         m_state.branchPending = true;
 diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
 index 463b6cf..a859e3a 100644
 --- a/ps2xTest/src/code_generator_tests.cpp
@@ -4766,6 +4838,49 @@ index 201b71e..e055835 100644
          tc.Run("standalone entry_ blocks register resume points for their JAL return addresses", [](TestCase &t) {
              const std::string uniqueSuffix =
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 0754b69..75364aa 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -1053,13 +1053,13 @@ void register_ps2_vu1_tests()
+                      "the flag-driven branch should arrive at its target");
+         });
+ 
+-        tc.Run("JR shares the one-instruction VI branch visibility rule", [](TestCase &t)
++        tc.Run("JR reads the VI written by the previous instruction (no conditional-branch quirk)", [](TestCase &t)
+         {
+             Vu1Fixture fx;
+             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+ 
+             writeVuInstructionPair(
+-                fx.code, 0u, makeVuIaddiu(1u, 0u, 2),
++                fx.code, 0u, makeVuIaddiu(1u, 0u, 4),
+                 kVuUpperNop);
+             writeVuInstructionPair(
+                 fx.code, 8u, makeVuJr(1u),
+@@ -1075,19 +1075,19 @@ void register_ps2_vu1_tests()
+                 kVuUpperNop);
+ 
+             VU1Interpreter vu1;
+-            vu1.state().vi[1] = 4;
++            vu1.state().vi[1] = 2;
+             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                         0u, 0u, 0u, 4u);
+ 
+-            t.Equals(vu1.state().vi[1], 2,
++            t.Equals(vu1.state().vi[1], 4,
+                      "the pending IALU write should still commit normally");
+             t.Equals(vu1.state().vi[2], 2,
+                      "JR should execute exactly one delay-slot pair");
+             t.Equals(vu1.state().vi[3], 0,
+                      "JR should skip the sequential instruction after its delay slot");
+             t.Equals(vu1.state().vi[4], 4,
+-                     "JR immediately after a VI write should branch using the previous VI value");
++                     "JR immediately after a VI write should branch using the new VI value");
+         });
+ 
+         tc.Run("MPG upload invalidates cached VU1 decode before MSCAL", [](TestCase &t)
 diff --git a/ps2xTest/src/test_function_table.cpp b/ps2xTest/src/test_function_table.cpp
 index be6a888..b91b09e 100644
 --- a/ps2xTest/src/test_function_table.cpp
