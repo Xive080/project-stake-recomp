@@ -794,10 +794,20 @@ index b32e44a..072e343 100644
  
      void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
-index aed4cb5..c9349c7 100644
+index aed4cb5..793c4e6 100644
 --- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
-@@ -590,80 +590,59 @@ namespace ps2_stubs
+@@ -17,7 +17,8 @@ namespace ps2_stubs
+ 
+         uint64_t makeClearRgbaq(uint32_t rgba)
+         {
+-            return static_cast<uint64_t>(rgba);
++            // sceGsSetDefClear deja Q = 1.0f en RGBAQ (visto en la RAM de PCSX2, db+0x100 = 0x3F800000_00000000).
++            return static_cast<uint64_t>(rgba) | (0x3F800000ull << 32);
+         }
+ 
+         uint64_t makeClearXyz(int32_t x, int32_t y)
+@@ -590,80 +591,59 @@ namespace ps2_stubs
          setReturnU32(ctx, terminatePacketBuilderState(rdram, ctx, runtime));
      }
  
@@ -913,7 +923,7 @@ index aed4cb5..c9349c7 100644
          setReturnS32(ctx, 0);
      }
  
-@@ -802,51 +781,16 @@ namespace ps2_stubs
+@@ -802,51 +782,16 @@ namespace ps2_stubs
              g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
              g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
              writeGsGParamToScratch(runtime);
@@ -972,7 +982,24 @@ index aed4cb5..c9349c7 100644
              }
          }
  
-@@ -962,7 +906,9 @@ namespace ps2_stubs
+@@ -943,10 +888,12 @@ namespace ps2_stubs
+         uint32_t psm = getRegU32(ctx, 5);
+         uint32_t w = getRegU32(ctx, 6);
+         uint32_t h = getRegU32(ctx, 7);
+-        const uint32_t ztest = readStackU32(rdram, ctx, 16);
+-        const uint32_t zpsm = readStackU32(rdram, ctx, 20);
+-        const uint32_t clear = readStackU32(rdram, ctx, 24);
+-        (void)clear;
++        // libgraph: sceGsSetDefDBuff(db, psm, w, h, ztest, zpsm, clear). Los argumentos 5-7 llegan en $t0-$t2 (EABI del EE),
++        // no en la pila: con readStackU32 el stub leia basura (ztest=0 -> TEST ALWAYS en vez de GEQUAL, clear=0).
++        const GsTrailingArgs3 trailing = decodeGsTrailingArgs3(rdram, ctx);
++        const uint32_t ztest = trailing.arg0;
++        const uint32_t zpsm = trailing.arg1;
++        const uint32_t clear = trailing.arg2;
+ 
+         if (w == 0u)
+         {
+@@ -962,7 +909,9 @@ namespace ps2_stubs
          const uint64_t smode2 =
              (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
              (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
@@ -983,21 +1010,30 @@ index aed4cb5..c9349c7 100644
          const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
  
          const int32_t drawWidth = static_cast<int32_t>(w);
-@@ -982,11 +928,12 @@ namespace ps2_stubs
+@@ -982,11 +931,20 @@ namespace ps2_stubs
          db.disp[0].display = display;
          db.disp[0].bgcolor = 0u;
          db.disp[1] = db.disp[0];
 +        db.disp[1].dispfb = dispfb1;
  
-         db.giftag0 = {makeGiftagAplusD(14u), 0x0E0E0E0E0E0E0E0EULL};
+-        db.giftag0 = {makeGiftagAplusD(14u), 0x0E0E0E0E0E0E0E0EULL};
++        // Como libgraph (0x153400): giftag A+D con NLOOP=8 (sceGsDrawEnv1) o 14 si clear != 0, porque entonces le sigue el
++        // sceGsClear (6 qw: TEST ALWAYS, PRIM sprite, RGBAQ, 2x XYZ2 z=0, TEST restaurado) que sceGsSwapDBuff envia cada frame.
++        const bool seedClear = clear != 0u;
++        db.giftag0 = {makeGiftagAplusD(seedClear ? 14u : 8u), 0xEULL};
          seedGsDrawEnv1(db.draw0, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
          db.giftag1 = db.giftag0;
 -        seedGsDrawEnv1(db.draw1, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
 +        seedGsDrawEnv1(db.draw1, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
++        if (seedClear)
++        {
++            seedGsClearPacket(db.clear0, drawWidth, drawHeight, 0u, ztest, false);
++            seedGsClearPacket(db.clear1, drawWidth, drawHeight, 0u, ztest, false);
++        }
  
          if (!writeGsDBuff(rdram, envAddr, db))
          {
-@@ -1105,8 +1052,68 @@ namespace ps2_stubs
+@@ -1105,8 +1063,68 @@ namespace ps2_stubs
          setReturnS32(ctx, 8);
      }
  
@@ -1066,7 +1102,7 @@ index aed4cb5..c9349c7 100644
          uint32_t imgAddr = getRegU32(ctx, 4);
          const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
  
-@@ -1123,11 +1130,6 @@ namespace ps2_stubs
+@@ -1123,11 +1141,6 @@ namespace ps2_stubs
          setReturnS32(ctx, 0);
      }
  
@@ -1078,6 +1114,30 @@ index aed4cb5..c9349c7 100644
      void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t envAddr = getRegU32(ctx, 4);
+@@ -1199,13 +1212,16 @@ namespace ps2_stubs
+         }
+ 
+         applyGsDispEnv(runtime, db.disp[which]);
+-        if (which == 0u)
+-        {
+-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw0), 8u);
+-        }
+-        else
+-        {
+-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw1), 8u);
++        // El real (0x153698) hace sceGsPutDrawEnv(&giftagN): manda NLOOP+1 qw por PATH3, asi que si el giftag dice 14 el
++        // sceGsClear que va detras del drawenv tambien se ejecuta (borra color y Z del buffer de dibujo cada frame).
++        const GsGiftagMem &tag = (which == 0u) ? db.giftag0 : db.giftag1;
++        const GsClearMem &clr = (which == 0u) ? db.clear0 : db.clear1;
++        applyGsRegPairs(runtime,
++                        reinterpret_cast<const GsRegPairMem *>(which == 0u ? &db.draw0 : &db.draw1),
++                        8u);
++        if ((tag.lo & 0x7FFFull) >= 14u)
++        {
++            applyGsClearPacket(runtime, clr);
+         }
+ 
+         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
 diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
 index 5110ee2..a57556d 100644
 --- a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
