@@ -424,6 +424,167 @@ index e5f63a9..c6c383e 100644
          return isMemoryRange(address, size) &&
                 m_impl->memory.zeroRam(address, size);
      }
+diff --git a/ps2xRecomp/include/ps2recomp/ps2_recompiler.h b/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
+index dd62275..0a550b7 100644
+--- a/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
++++ b/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
+@@ -70,6 +70,8 @@ namespace ps2recomp
+         std::unordered_set<std::string> m_stubFunctions;
+         std::unordered_set<uint32_t> m_stubFunctionStarts;
+         std::unordered_map<uint32_t, std::string> m_stubHandlerBindingsByStart;
++        std::unordered_set<std::string> m_guestFunctions;
++        std::unordered_set<uint32_t> m_guestFunctionStarts;
+         std::unordered_set<uint32_t> m_entryPointHintStarts;
+         std::unordered_set<uint32_t> m_correctnessCriticalFunctionStarts;
+         std::map<uint32_t, std::string> m_generatedStubs;
+diff --git a/ps2xRecomp/include/ps2recomp/types.h b/ps2xRecomp/include/ps2recomp/types.h
+index 9bd687d..399e781 100644
+--- a/ps2xRecomp/include/ps2recomp/types.h
++++ b/ps2xRecomp/include/ps2recomp/types.h
+@@ -187,6 +187,9 @@ namespace ps2recomp
+         std::vector<std::string> skipFunctions;
+         std::unordered_map<uint32_t, std::string> patches;
+         std::vector<std::string> stubImplementations;
++        // Functions that must run the game's own code even if a runtime stub shares the name (e.g. a libm built with
++        // 64-bit soft-float doubles, whose ABI differs from the float stubs).
++        std::vector<std::string> guestFunctions;
+         std::vector<std::string> entryPointHints;
+         std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
+         std::vector<JumpTable> jumpTables;
+diff --git a/ps2xRecomp/src/lib/config_manager.cpp b/ps2xRecomp/src/lib/config_manager.cpp
+index 97dc2dd..3ddd4ab 100644
+--- a/ps2xRecomp/src/lib/config_manager.cpp
++++ b/ps2xRecomp/src/lib/config_manager.cpp
+@@ -74,6 +74,15 @@ namespace ps2recomp
+                 config.stubImplementations = toml::find<std::vector<std::string>>(data, "stubs");
+             }
+ 
++            if (general.contains("guest_functions") && general.at("guest_functions").is_array())
++            {
++                config.guestFunctions = toml::find<std::vector<std::string>>(general, "guest_functions");
++            }
++            else if (data.contains("guest_functions") && data.at("guest_functions").is_array())
++            {
++                config.guestFunctions = toml::find<std::vector<std::string>>(data, "guest_functions");
++            }
++
+             auto appendEntryPointHints = [&](const toml::value &table, const char *key)
+             {
+                 if (!table.contains(key) || !table.at(key).is_array())
+@@ -297,6 +306,10 @@ namespace ps2recomp
+         general["patch_cache"] = config.patchCache;
+         general["skip"] = config.skipFunctions;
+         general["stubs"] = config.stubImplementations;
++        if (!config.guestFunctions.empty())
++        {
++            general["guest_functions"] = config.guestFunctions;
++        }
+         general["entry_points"] = config.entryPointHints;
+         data["general"] = general;
+ 
+diff --git a/ps2xRecomp/src/lib/control_flow_emitter.cpp b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 4bf8dc5..95f69d7 100644
+--- a/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -406,10 +406,10 @@ namespace ps2recomp
+             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
+         case OPCODE_BLEZ:
+         case OPCODE_BLEZL:
+-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) <= 0", rsReg);
+         case OPCODE_BGTZ:
+         case OPCODE_BGTZL:
+-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) > 0", rsReg);
+         case OPCODE_REGIMM:
+             switch (m_branchInst.rt)
+             {
+@@ -417,12 +417,12 @@ namespace ps2recomp
+             case REGIMM_BLTZL:
+             case REGIMM_BLTZAL:
+             case REGIMM_BLTZALL:
+-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) < 0", rsReg);
+             case REGIMM_BGEZ:
+             case REGIMM_BGEZL:
+             case REGIMM_BGEZAL:
+             case REGIMM_BGEZALL:
+-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) >= 0", rsReg);
+             default:
+                 return "false";
+             }
+diff --git a/ps2xRecomp/src/lib/ps2_recompiler.cpp b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+index 8c1c7c5..5f06935 100644
+--- a/ps2xRecomp/src/lib/ps2_recompiler.cpp
++++ b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+@@ -849,6 +849,8 @@ namespace ps2recomp
+             m_stubFunctions.clear();
+             m_stubFunctionStarts.clear();
+             m_stubHandlerBindingsByStart.clear();
++            m_guestFunctions.clear();
++            m_guestFunctionStarts.clear();
+             m_entryPointHintStarts.clear();
+             m_correctnessCriticalFunctionStarts.clear();
+ 
+@@ -891,6 +893,22 @@ namespace ps2recomp
+                     }
+                 }
+             }
++            // guest_functions win over stubs (explicit or by runtime name): "name@0xADDR" selects one start, a bare
++            // name selects every function with that name.
++            for (const auto &name : m_config.guestFunctions)
++            {
++                const FunctionSelector selector = parseFunctionSelector(name);
++                if (selector.start.has_value())
++                {
++                    m_guestFunctionStarts.insert(*selector.start);
++                    m_stubFunctionStarts.erase(*selector.start);
++                    m_stubHandlerBindingsByStart.erase(*selector.start);
++                }
++                else if (!selector.name.empty())
++                {
++                    m_guestFunctions.insert(selector.name);
++                }
++            }
+             for (const auto &hint : m_config.entryPointHints)
+             {
+                 const FunctionSelector selector = parseFunctionSelector(hint);
+@@ -1000,11 +1018,21 @@ namespace ps2recomp
+             m_decoder = std::make_unique<R5900Decoder>();
+             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols, m_sections);
+             m_codeGenerator->setReporter(&m_reporter);
++            // Calls through a relocation are bound to the runtime handler by symbol name; a guest function must be
++            // reached through its recompiled code instead.
++            std::unordered_set<std::string> guestCallNames = m_guestFunctions;
++            for (const auto &function : m_functions)
++            {
++                if (m_guestFunctionStarts.contains(function.start))
++                {
++                    guestCallNames.insert(function.name);
++                }
++            }
+             std::unordered_map<uint32_t, std::string> relocationCallNames;
+             relocationCallNames.reserve(m_relocations.size());
+             for (const auto &reloc : m_relocations)
+             {
+-                if (reloc.symbolName.empty())
++                if (reloc.symbolName.empty() || guestCallNames.contains(reloc.symbolName))
+                 {
+                     continue;
+                 }
+@@ -2221,6 +2249,11 @@ namespace ps2recomp
+ 
+     bool PS2Recompiler::isStubFunction(const Function &function) const
+     {
++        if (m_guestFunctionStarts.contains(function.start) || m_guestFunctions.contains(function.name))
++        {
++            return false;
++        }
++
+         if (m_stubFunctionStarts.contains(function.start))
+         {
+             return true;
 diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
 index 589d768..8fff17d 100644
 --- a/ps2xRuntime/CMakeLists.txt
@@ -3963,6 +4124,54 @@ index f872edd..d2f0d23 100644
              }
  
              pos += qwCount * 16;
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 463b6cf..7cb4f34 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1719,6 +1719,43 @@ void register_code_generator_tests()
+             t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
+         });
+ 
++        tc.Run("sign branches test the whole 64-bit register", [](TestCase &t) {
++            // R5900 BLTZ/BGEZ/BLEZ/BGTZ compare all 64 bits (soft-float doubles in VN's libgcc branch on bit 63).
++            struct Case { uint32_t opcode; uint32_t rt; const char *cond; };
++            const Case cases[] = {
++                {OPCODE_REGIMM, REGIMM_BLTZ, "GPR_S64(ctx, 2) < 0"},
++                {OPCODE_REGIMM, REGIMM_BGEZ, "GPR_S64(ctx, 2) >= 0"},
++                {OPCODE_BLEZ, 0, "GPR_S64(ctx, 2) <= 0"},
++                {OPCODE_BGTZ, 0, "GPR_S64(ctx, 2) > 0"},
++            };
++            for (const Case &c : cases)
++            {
++                Function func;
++                func.name = "sign_branch";
++                func.start = 0x1240;
++                func.end = 0x1250;
++                func.isRecompiled = true;
++                func.isStub = false;
++
++                Instruction br{};
++                br.address = 0x1240;
++                br.opcode = c.opcode;
++                br.rs = 2;
++                br.rt = c.rt;
++                br.simmediate = 1; // target = 0x1248
++                br.isBranch = true;
++                br.hasDelaySlot = true;
++                br.raw = 0;
++
++                CodeGenerator gen({}, {});
++                const std::string generated =
++                    gen.generateFunction(func, {br, makeNop(0x1244), makeNop(0x1248)}, false);
++                t.IsTrue(generated.find(c.cond) != std::string::npos, c.cond);
++                t.IsTrue(generated.find("GPR_S32(ctx, 2)") == std::string::npos,
++                         "the branch condition must not truncate rs to 32 bits");
++            }
++        });
++
+         tc.Run("JR $31 returns through dynamic target without broad local switch", [](TestCase &t) {
+             Function func;
+             func.name = "jr_ra_return";
 diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
 index 113cc88..4d451b1 100644
 --- a/ps2xTest/src/ps2_gs_tests.cpp
@@ -4111,6 +4320,82 @@ index 113cc88..4d451b1 100644
          tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)
          {
              PS2Runtime runtime;
+diff --git a/ps2xTest/src/ps2_recompiler_tests.cpp b/ps2xTest/src/ps2_recompiler_tests.cpp
+index 201b71e..e055835 100644
+--- a/ps2xTest/src/ps2_recompiler_tests.cpp
++++ b/ps2xTest/src/ps2_recompiler_tests.cpp
+@@ -767,7 +767,8 @@ static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
+                                       const std::filesystem::path &outputPath,
+                                       const std::vector<std::string> &skip,
+                                       const std::vector<std::string> &stubs = {},
+-                                      const std::vector<std::string> &entryPoints = {})
++                                      const std::vector<std::string> &entryPoints = {},
++                                      const std::vector<std::string> &guestFunctions = {})
+ {
+     std::ofstream config(configPath);
+     if (!config)
+@@ -800,6 +801,14 @@ static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
+         config << '"' << entryPoints[i] << '"';
+     }
+     config << "]\n";
++    config << "guest_functions = [";
++    for (size_t i = 0; i < guestFunctions.size(); ++i)
++    {
++        if (i != 0u)
++            config << ", ";
++        config << '"' << guestFunctions[i] << '"';
++    }
++    config << "]\n";
+     return static_cast<bool>(config);
+ }
+ 
+@@ -1471,6 +1480,46 @@ void register_ps2_recompiler_tests()
+             std::filesystem::remove_all(tempRoot, removeError);
+         });
+ 
++        tc.Run("guest_functions recompiles a function whose name has a runtime stub", [](TestCase &t) {
++            // VN (SCES_504.11) links a libm built with 64-bit soft-float doubles: cos takes $a0 and returns $v0, while
++            // the runtime's cos stub uses $f12/$f0. guest_functions must keep the game's own code for such a function.
++            const std::string uniqueSuffix =
++                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
++            const std::filesystem::path tempRoot =
++                std::filesystem::temp_directory_path() / ("ps2recomp-guest-functions-" + uniqueSuffix);
++            std::filesystem::create_directories(tempRoot);
++            const std::filesystem::path elfPath = tempRoot / "guest.elf";
++            t.IsTrue(writeMinimalMipsElfWithUnmappedEntryHint(elfPath), "guest_functions ELF should be generated");
++
++            auto generatedCallsCosStub = [&](const std::vector<std::string> &guest, const char *tag) {
++                const std::filesystem::path configPath = tempRoot / (std::string(tag) + ".toml");
++                const std::filesystem::path outputPath = tempRoot / tag;
++                if (!writeRecompilerTestConfig(configPath, elfPath, outputPath, {}, {"cos@0x00100020"}, {}, guest))
++                    return false;
++                PS2Recompiler recompiler(configPath.string());
++                if (!recompiler.initialize() || !recompiler.recompile())
++                    return false;
++                recompiler.generateOutput();
++                for (const auto &entry : std::filesystem::directory_iterator(outputPath))
++                {
++                    std::ifstream file(entry.path());
++                    const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
++                    if (text.find("ps2_stubs::cos(") != std::string::npos)
++                        return true;
++                }
++                return false;
++            };
++
++            t.IsTrue(generatedCallsCosStub({}, "stubbed"), "a stub binding to cos should dispatch to the runtime stub");
++            t.IsFalse(generatedCallsCosStub({"cos@0x00100020"}, "guest_by_start"),
++                      "guest_functions by address should recompile the guest code instead of the stub");
++            t.IsFalse(generatedCallsCosStub({"known_after"}, "guest_by_name"),
++                      "guest_functions by name should recompile the guest code instead of the stub");
++
++            std::error_code removeError;
++            std::filesystem::remove_all(tempRoot, removeError);
++        });
++
+         tc.Run("standalone entry_ blocks register resume points for their JAL return addresses", [](TestCase &t) {
+             const std::string uniqueSuffix =
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 diff --git a/ps2xTest/src/test_function_table.cpp b/ps2xTest/src/test_function_table.cpp
 index be6a888..b91b09e 100644
 --- a/ps2xTest/src/test_function_table.cpp

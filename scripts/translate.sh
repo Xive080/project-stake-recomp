@@ -19,6 +19,11 @@ $B/ps2xAnalyzer/ps2_analyzer work/game.elf work/game.toml
 # escrituras normales a globales de sceMpeg/sceCd/MPS/ADX (p.ej. 0x182520 guarda el puntero de trabajo de MPS,
 # sin el cual MPS_Create devuelve 0 y Sofdec no arranca). El juego no se automodifica: se quitan esos parches.
 sed -i.bak '/# Potential self-modifying code/d' work/game.toml && rm -f work/game.toml.bak
+# La libm de VN usa double de 64 bits por software (argumento en $a0, resultado en $v0; ver `cos` 0x150180). Los stubs
+# del runtime con esos nombres usan la ABI float ($f12 -> $f0) y devolvian el propio argumento: la tabla de la IDCT
+# dispersa de Sofdec (initSparseTbl, via DCT_AcInit -> cos) salia con rampas y el video tenia bloques de color (#29).
+# `guest_functions` (opcion del parche acumulado de PS2Recomp) hace que se recompile el codigo del juego.
+sed -i.bak 's/^# Functions to stub/guest_functions = ["cos@0x00150180", "fabs@0x00150288", "floor@0x001502C0", "log@0x001506B0"]\n\n&/' work/game.toml && rm -f work/game.toml.bak
 $B/ps2xRecomp/ps2_recomp work/game.toml > work/run.log 2>&1 || true
 echo "primera pasada, errores: $(grep -c '\[error\]' work/run.log)"
 # segunda pasada: las funciones con error son datos tomados por codigo; se saltan
