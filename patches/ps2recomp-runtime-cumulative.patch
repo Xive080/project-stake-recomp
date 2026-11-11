@@ -1,0 +1,3156 @@
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index 4832d8f..476cd1c 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -25,6 +25,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::reset()
+     {
++        ++m_version;
+         m_threads.clear();
+         m_semaphores.clear();
+         m_eventFlags.clear();
+@@ -36,6 +37,7 @@ namespace ps2x::iop::detail
+ 
+     bool IopKernel::dispatchThreadImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle)
+     {
++        ++m_version;
+         const auto setV0 = [&](int32_t value)
+         {
+             cpu.gpr[2] = static_cast<uint32_t>(value);
+@@ -352,6 +354,7 @@ namespace ps2x::iop::detail
+ 
+     bool IopKernel::dispatchSemaphoreImport(uint16_t ordinal, IopCpuState &cpu)
+     {
++        ++m_version;
+         const auto setV0 = [&](int32_t value)
+         {
+             cpu.gpr[2] = static_cast<uint32_t>(value);
+@@ -504,6 +507,7 @@ namespace ps2x::iop::detail
+ 
+     int IopKernel::createInternalEventFlag(uint32_t attr, uint32_t option, uint32_t bits)
+     {
++        ++m_version;
+         EventFlag event;
+         event.id = static_cast<int>(m_nextEventFlagId++);
+         event.attr = attr;
+@@ -516,6 +520,7 @@ namespace ps2x::iop::detail
+ 
+     bool IopKernel::setInternalEventFlag(int id, uint32_t bits)
+     {
++        ++m_version;
+         const auto event = m_eventFlags.find(id);
+         if (event == m_eventFlags.end())
+             return false;
+@@ -526,6 +531,7 @@ namespace ps2x::iop::detail
+ 
+     bool IopKernel::dispatchEventImport(uint16_t ordinal, IopCpuState &cpu)
+     {
++        ++m_version;
+         const auto setV0 = [&](int32_t value)
+         {
+             cpu.gpr[2] = static_cast<uint32_t>(value);
+@@ -654,6 +660,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::sleepCurrent(IopCpuState &cpu)
+     {
++        ++m_version;
+         if (m_currentThread == nullptr)
+             return;
+         m_currentThread->state = IopThreadState::Sleep;
+@@ -662,6 +669,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu)
+     {
++        ++m_version;
+         if (m_currentThread == nullptr)
+             return;
+         m_currentThread->wakeCycle = wakeCycle;
+@@ -671,15 +679,24 @@ namespace ps2x::iop::detail
+ 
+     IopThread *IopKernel::beginNextReady(uint64_t currentCycle)
+     {
+-        for (auto &[id, thread] : m_threads)
+-        {
+-            if (thread.state == IopThreadState::Delay && thread.wakeCycle <= currentCycle)
+-                thread.state = IopThreadState::Ready;
+-        }
++        if (m_idleVersion == m_version && currentCycle < m_idleWake)
++            return nullptr;
+ 
++        // One pass: waking a due Delay thread and picking the lowest (priority, id) Ready one do not depend on
++        // the visiting order.
+         IopThread *next = nullptr;
++        uint64_t wake = ~0ull;
+         for (auto &[id, thread] : m_threads)
+         {
++            if (thread.state == IopThreadState::Delay)
++            {
++                if (thread.wakeCycle > currentCycle)
++                {
++                    wake = std::min(wake, thread.wakeCycle);
++                    continue;
++                }
++                thread.state = IopThreadState::Ready;
++            }
+             if (thread.state != IopThreadState::Ready)
+                 continue;
+             if (next == nullptr || thread.priority < next->priority ||
+@@ -687,8 +704,13 @@ namespace ps2x::iop::detail
+                 next = &thread;
+         }
+         if (next == nullptr)
++        {
++            m_idleVersion = m_version;
++            m_idleWake = wake;
+             return nullptr;
++        }
+ 
++        ++m_version;
+         m_currentThread = next;
+         next->state = IopThreadState::Running;
+         next->cpu.stopped = false;
+@@ -698,6 +720,8 @@ namespace ps2x::iop::detail
+ 
+     uint64_t IopKernel::nextWakeCycle(uint64_t fallback) const
+     {
++        if (m_idleVersion == m_version)
++            return std::min(fallback, m_idleWake);
+         uint64_t nextWake = fallback;
+         for (const auto &[id, thread] : m_threads)
+         {
+@@ -709,6 +733,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::endTimeslice(IopThread &thread, uint32_t returnSentinel)
+     {
++        ++m_version;
+         if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
+             thread.state = IopThreadState::Dormant;
+         else if (thread.state == IopThreadState::Running)
+@@ -719,6 +744,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::cleanupDeadThreads()
+     {
++        ++m_version;
+         for (auto thread = m_threads.begin(); thread != m_threads.end();)
+         {
+             if (thread->second.state != IopThreadState::Dead)
+@@ -734,6 +760,7 @@ namespace ps2x::iop::detail
+ 
+     void IopKernel::terminateThreadsInRange(uint32_t base, uint32_t size)
+     {
++        ++m_version;
+         for (auto &[id, thread] : m_threads)
+         {
+             const uint32_t pc = IopMemory::physicalAddress(thread.cpu.pc);
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
+index 4977102..5214c78 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.h
++++ b/ps2xIOP/src/emulator/core/iop_kernel.h
+@@ -99,5 +99,10 @@ namespace ps2x::iop::detail
+         uint32_t m_nextSemaphoreId = 1;
+         uint32_t m_nextEventFlagId = 1;
+         IopThread *m_currentThread = nullptr;
++        // Bumped by every public call that can change a thread. While it matches m_idleVersion and the cycle is
++        // below m_idleWake, beginNextReady knows no thread is ready and m_idleWake is the earliest Delay wake.
++        uint64_t m_version = 0;
++        uint64_t m_idleVersion = ~0ull;
++        uint64_t m_idleWake = 0;
+     };
+ }
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index 25e9b36..9745118 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -269,9 +269,19 @@ namespace ps2x::iop::detail
+         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
+         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
+         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
++        // AutoDMA (SPU2 ADMAS, 0x1F9001B0 core 0 bit 0 / 0x1F9005B0 core 1 bit 1): la DMA solo avanza al ritmo al que el SPU2
++        // reproduce el bloque, 48 kHz x 2 canales x 16 bits = 4 bytes (una palabra) cada 768 ciclos de IOP. Con la cuenta de
++        // transferencia rapida (2 ciclos por palabra) la interrupcion de fin de bloque llegaba ~400 veces demasiado pronto, el
++        // mezclador del driver de sonido (CRI ADX / nlsnd: psmmix_*) corria sin parar, el IOP interpretado nunca quedaba ocioso
++        // y se comia casi todo el tiempo de host del hilo del EE. Las transferencias normales a la RAM del SPU siguen rapidas.
++        const uint32_t admasAddress = secondCore ? 0x1F9005B0u : 0x1F9001B0u;
++        uint32_t admas = 0u;
++        if (const auto current = m_hardware.find(admasAddress); current != m_hardware.end())
++            admas = current->second & 0xFFFFu;
++        const bool autoDma = (admas & (secondCore ? 0x2u : 0x1u)) != 0u;
+         m_dmaStart = DmaStart{
+             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
+-            std::max<uint64_t>(transferWords * 2u, 64u),
++            std::max<uint64_t>(transferWords * (autoDma ? 768u : 2u), 64u),
+         };
+     }
+ 
+diff --git a/ps2xIOP/src/emulator/imports/iop_imports.cpp b/ps2xIOP/src/emulator/imports/iop_imports.cpp
+index f13267f..fdb6f0b 100644
+--- a/ps2xIOP/src/emulator/imports/iop_imports.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_imports.cpp
+@@ -43,9 +43,22 @@ namespace ps2x::iop::detail
+     void IopImportRegistry::reset()
+     {
+         m_libraries.clear();
++        m_decodeCache.clear();
+     }
+ 
+     std::optional<IopImportCall> IopImportRegistry::decode(uint32_t pc) const
++    {
++        const uint32_t w0 = m_memory.read32(pc);
++        const uint32_t w1 = m_memory.read32(pc + 4u);
++        if (auto it = m_decodeCache.find(pc); it != m_decodeCache.end() &&
++                                              it->second.word0 == w0 && it->second.word1 == w1)
++            return it->second.call;
++        auto result = decodeUncached(pc);
++        m_decodeCache[pc] = DecodeCacheEntry{w0, w1, result};
++        return result;
++    }
++
++    std::optional<IopImportCall> IopImportRegistry::decodeUncached(uint32_t pc) const
+     {
+         if (m_memory.read32(pc) != 0x03E00008u)
+             return std::nullopt;
+@@ -101,6 +114,7 @@ namespace ps2x::iop::detail
+ 
+     bool IopImportRegistry::registerExportTable(uint32_t address)
+     {
++        m_decodeCache.clear();
+         const uint32_t physical = IopMemory::physicalAddress(address);
+         if (physical + 20u > IopMemory::RamSize ||
+             m_memory.read32(physical) != kExportMagic)
+@@ -184,6 +198,7 @@ namespace ps2x::iop::detail
+ 
+     void IopImportRegistry::eraseRange(uint32_t base, uint32_t size)
+     {
++        m_decodeCache.clear();
+         for (auto library = m_libraries.begin(); library != m_libraries.end();)
+         {
+             if (library->first >= base && library->first < base + size)
+diff --git a/ps2xIOP/src/emulator/imports/iop_imports.h b/ps2xIOP/src/emulator/imports/iop_imports.h
+index cae8d91..1a9f08d 100644
+--- a/ps2xIOP/src/emulator/imports/iop_imports.h
++++ b/ps2xIOP/src/emulator/imports/iop_imports.h
+@@ -3,6 +3,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <map>
++#include <unordered_map>
+ #include <optional>
+ #include <string>
+ #include <string_view>
+@@ -42,9 +43,18 @@ namespace ps2x::iop::detail
+             std::vector<uint32_t> functions;
+         };
+ 
++        [[nodiscard]] std::optional<IopImportCall> decodeUncached(uint32_t pc) const;
+         [[nodiscard]] const ExportLibrary *findLibrary(std::string_view name, std::optional<uint16_t> version) const;
+ 
+         IopMemory &m_memory;
+         std::map<uint32_t, ExportLibrary> m_libraries;
++        // Cache de decode por pc: evita el barrido hacia atras de 64 KB en cada llamada.
++        struct DecodeCacheEntry
++        {
++            uint32_t word0 = 0;
++            uint32_t word1 = 0;
++            std::optional<IopImportCall> call;
++        };
++        mutable std::unordered_map<uint32_t, DecodeCacheEntry> m_decodeCache;
+     };
+ }
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index e5f63a9..c6c383e 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -1,3 +1,7 @@
++#include <unordered_map>
++#include <chrono>
++#include <algorithm>
++#include <cstdio>
+ #include "iop_emulator.h"
+ #include "imports/iop_cdvd.h"
+ #include "core/iop_cpu.h"
+@@ -125,6 +129,8 @@ namespace ps2x::iop::detail
+             timrman.reset();
+             ioman.reset();
+             pendingDmaInterrupts.clear();
++            nextDmaDue = UINT64_MAX;
++            idleUntil = 0;
+             pendingGuestCallbacks.clear();
+             nextModuleId = 1;
+             moduleCursor = kModuleLoadBase;
+@@ -177,7 +183,10 @@ namespace ps2x::iop::detail
+         void schedulePendingDma()
+         {
+             if (const auto dma = memory.takeDmaStart())
++            {
+                 pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
++                nextDmaDue = std::min(nextDmaDue, totalCycles + dma->delayCycles);
++            }
+         }
+ 
+         bool readRam(uint32_t address, void *destination, size_t size) const
+@@ -406,7 +415,7 @@ namespace ps2x::iop::detail
+             {
+                 if (!step(cpu))
+                     break;
+-                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
++                if (!servicingDmaInterrupts && totalCycles >= nextDmaDue)
+                     servicePendingDmaInterrupts();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                     servicePendingGuestCallbacks();
+@@ -507,9 +516,18 @@ namespace ps2x::iop::detail
+             catch (...)
+             {
+                 servicingDmaInterrupts = false;
++                updateNextDmaDue();
+                 throw;
+             }
+             servicingDmaInterrupts = false;
++            updateNextDmaDue();
++        }
++
++        void updateNextDmaDue()
++        {
++            nextDmaDue = UINT64_MAX;
++            for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
++                nextDmaDue = std::min(nextDmaDue, completionCycle);
+         }
+ 
+         void servicePendingGuestCallbacks()
+@@ -555,23 +573,33 @@ namespace ps2x::iop::detail
+ 
+         void runCycles(uint64_t cycles) noexcept
+         {
++            // The last pass found no ready thread and nothing due before idleUntil, and nothing has entered the
++            // IOP since: the loop below would only advance the clock.
++            if (totalCycles + cycles <= idleUntil)
++            {
++                totalCycles += cycles;
++                return;
++            }
+             try
+             {
+                 const uint64_t target = totalCycles + cycles;
+                 while (totalCycles < target)
+                 {
++                    idleUntil = 0;
+                     servicePendingDmaInterrupts();
+                     servicePendingGuestCallbacks();
+                     timrman.serviceDue(totalCycles, *this);
+                     IopThread *next = kernel.beginNextReady(totalCycles);
+                     if (!next)
+                     {
+-                        uint64_t nextWake = kernel.nextWakeCycle(target);
++                        uint64_t nextWake = kernel.nextWakeCycle(UINT64_MAX);
+                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+                             nextWake = std::min(nextWake, completionCycle);
+                         if (!pendingGuestCallbacks.empty())
+                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                         nextWake = timrman.nextEventCycle(nextWake);
++                        if (nextWake > totalCycles)
++                            idleUntil = nextWake;
+                         totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                         continue;
+                     }
+@@ -702,6 +730,8 @@ namespace ps2x::iop::detail
+         uint64_t totalCycles = 0;
+         uint64_t totalInstructions = 0;
+         uint64_t eeCycleCarry = 0;
++        uint64_t nextDmaDue = UINT64_MAX; // earliest pendingDmaInterrupts cycle (may be early, never late)
++        uint64_t idleUntil = 0;           // see runCycles; cleared by every other entry into the IOP
+         CpuState *activeCpu = nullptr;
+         std::string lastError;
+         bool servicingDmaInterrupts = false;
+@@ -726,16 +756,19 @@ namespace ps2x::iop::detail
+ 
+     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->loadModule(path, arguments, argumentSize);
+     }
+ 
+     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
+     }
+ 
+     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->stopModule(moduleId, result);
+     }
+ 
+@@ -750,6 +783,7 @@ namespace ps2x::iop::detail
+ 
+     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->rpc.handleRpc(request, *m_impl);
+     }
+ 
+@@ -760,16 +794,19 @@ namespace ps2x::iop::detail
+ 
+     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
+     {
++        m_impl->idleUntil = 0;
+         m_impl->rpc.onSifTransfer(transfer);
+     }
+ 
+     uint32_t IopEmulator::allocateMemory(uint32_t size, uint32_t alignment)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->memory.allocate(size, alignment);
+     }
+ 
+     bool IopEmulator::freeMemory(uint32_t address)
+     {
++        m_impl->idleUntil = 0;
+         return m_impl->memory.freeAllocation(address);
+     }
+ 
+@@ -781,12 +818,14 @@ namespace ps2x::iop::detail
+ 
+     bool IopEmulator::writeMemory(uint32_t address, const void *source, size_t size)
+     {
++        m_impl->idleUntil = 0;
+         return isMemoryRange(address, size) &&
+                m_impl->memory.writeRam(address, source, size);
+     }
+ 
+     bool IopEmulator::zeroMemory(uint32_t address, size_t size)
+     {
++        m_impl->idleUntil = 0;
+         return isMemoryRange(address, size) &&
+                m_impl->memory.zeroRam(address, size);
+     }
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 589d768..8fff17d 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -390,6 +390,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_vfs.cpp
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
++    src/lib/ipu/ps2_ipu.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+     src/lib/vu/ps2_vu1_upper.cpp
+     src/lib/vu/ps2_vu1_lower.cpp
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index f247ff9..dafbb0f 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -382,6 +382,7 @@ private:
+     void makeReady(GuestThread &thread, int result, bool interruptSafe);
+     void requestPreemptionIfHigher(const GuestThread &readyThread, bool interruptSafe);
+     void applyPendingPreemption();
++    [[nodiscard]] bool interruptInvocationActive() const;
+     void processPendingEvents();
+     void processDueDeadlines();
+     void processEvent(const EeEvent &event);
+@@ -426,6 +427,18 @@ private:
+     bool m_insideInterrupt = false;
+     uint32_t m_pendingEeTimerInterrupts = 0;
+     uint64_t m_eeCycle = 0;
++    // Guest-cycle clock vs host clock. Each dispatch only accounts kGuestDispatchCycles, so a guest thread
++    // that busy-waits (CRI ADXM user-idle thread spinning in nlWaitVSync) makes the cycle clock lag wall time
++    // and every cycle-gated deadline (VBlank, EE timers, IOP) slows down with it. syncCyclesToHostClock keeps
++    // m_eeCycle from falling behind the host clock, as real hardware would.
++    std::chrono::steady_clock::time_point m_hostClockAnchor{};
++    uint64_t m_eeCycleAnchor = 0;
++    uint32_t m_hostClockSyncCountdown = 0;
++    // While a guest thread can run, an event that is due by cycle but not yet by host time does not block the
++    // executor: the event is held until its host deadline and the guest keeps running (pacing without starving).
++    std::chrono::steady_clock::time_point m_pacingHoldUntil{};
++    [[nodiscard]] bool pacingHoldActive() const noexcept;
++    void syncCyclesToHostClock() noexcept;
+     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
+     std::thread::id m_executorThread{};
+     std::atomic<bool> m_running{false};
+diff --git a/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h b/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
+index 2421f9e..4f787b0 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
+@@ -4,7 +4,10 @@
+ #include "runtime/gs/gs_texture_page_cache.h"
+ 
+ #include <array>
++#include <chrono>
++#include <map>
+ #include <mutex>
++#include <set>
+ #include <vector>
+ 
+ class GSCpuBackend final : public GSRasterBackend
+@@ -74,6 +77,21 @@ private:
+     std::array<uint32_t, 2> m_clutCbp{};
+     GSMem::TexturePageCache m_texturePageCache;
+ 
++    // Presentacion sin tearing: el raster es sincrono y lento, asi que el hilo de presentacion puede ver un buffer a medio dibujar.
++    // Al dejar de dibujar en un framebuffer (el juego pasa a otro) se guarda su contenido como "ultimo fotograma completo" y, mientras
++    // ese buffer se vuelve a dibujar, la presentacion usa esa copia en vez de la VRAM en vivo.
++    struct CompletedFrame
++    {
++        std::vector<uint8_t> bytes;
++        uint32_t byteBase = 0;
++    };
++    std::map<uint32_t, CompletedFrame> m_completedFrames;
++    std::set<uint32_t> m_drawnFbps;
++    uint32_t m_curDrawFbp = UINT32_MAX;
++    std::chrono::steady_clock::time_point m_lastDrawTime{};
++    void CaptureCompletedFrameUnlocked(uint32_t fbp);
++    void OverlayCompletedFrames(std::vector<uint8_t> &snapshot, const GSPresentationRequest &request) const;
++
+     GSTransferCommand m_transfer{};
+     GSTransferSnapshot m_transferState{};
+     std::vector<uint8_t> m_localToHostBuffer;
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index ea86a9c..9e1d34f 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -378,6 +378,8 @@ public:
+     std::atomic<uint64_t> m_vu1CodeGeneration{0};
+     // I/O registers
+     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
++    // GIF_STAT's node in m_ioRegisters once it exists (node pointers survive rehashing; reset on clear).
++    uint32_t *m_gifStatRegister = nullptr;
+ 
+     // Registers
+     GSRegisters gs_regs;
+@@ -450,6 +452,11 @@ public:
+ 
+     std::array<EeTimer, 4> m_eeTimers{};
+     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
++    // IPU (MPEG2): DMA4 toIPU / DMA3 fromIPU. pumpIpuFromDma completes a pending DMA3 as output becomes available.
++    bool tryProcessIpuDma(uint32_t channelBase, uint32_t chcr);
++    void pumpIpuFromDma();
++    bool m_ipuFromPending = false;
++    void drainMfifoVif1();
+     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+     void queueCompletedDmacCause(uint32_t cause);
+ };
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c5e31c4..2a336b0 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -4,6 +4,7 @@
+ #include "ps2_runtime_macros.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cassert>
+ #include <cstring>
+ #include <limits>
+@@ -112,6 +113,10 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     m_insideInterrupt = false;
+     m_pendingEeTimerInterrupts = 0u;
+     m_eeCycle = 0u;
++    m_hostClockAnchor = {};
++    m_eeCycleAnchor = 0u;
++    m_hostClockSyncCountdown = 0u;
++    m_pacingHoldUntil = {};
+     m_sliceEndCycle = kDefaultTimeSliceCycles;
+     m_stopRequested.store(false, std::memory_order_release);
+     m_checkpointPending.store(false, std::memory_order_release);
+@@ -141,11 +146,13 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     // returned by ReferThreadStatus. SetupThread records that metadata.
+     main.stack = 0u;
+     main.gp = getRegU32(&mainContext, 28);
+-    main.initialPriority = 0;
+-    main.currentPriority = 0;
++    // Kernel real (BIOS, medido en PCSX2): el hilo principal arranca con prioridad 1, no 0.
++    // Middleware como CRI ADX copia esta prioridad para sus hilos.
++    main.initialPriority = 1;
++    main.currentPriority = 1;
+     main.status = EeThreadStatus::Ready;
+     m_threads.emplace(main.id, std::move(main));
+-    m_readyQueues[0].push_back(kMainThreadId);
++    m_readyQueues[1].push_back(kMainThreadId);
+     scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
+                   std::chrono::steady_clock::now() + kVBlankPeriod,
+                   EeEvent{EeEventType::VBlankStart, 0, 0});
+@@ -314,7 +321,7 @@ void EeScheduler::run()
+         }
+ 
+         processPendingEvents();
+-        if (m_rescheduleRequested && m_currentThreadId != 0)
++        if (m_rescheduleRequested && m_currentThreadId != 0 && !interruptInvocationActive())
+         {
+             GuestThread *preempted = currentThread();
+             assert(preempted != nullptr);
+@@ -357,6 +364,11 @@ void EeScheduler::postEvent(EeEvent event)
+ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+ {
+     accountCycles(cycles);
++    if (++m_hostClockSyncCountdown >= 64u)
++    {
++        m_hostClockSyncCountdown = 0u;
++        syncCyclesToHostClock();
++    }
+ 
+     if (m_checkpointPending.load(std::memory_order_acquire) ||
+         m_stopRequested.load(std::memory_order_acquire))
+@@ -365,7 +377,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     }
+ 
+     const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
++    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle && !pacingHoldActive())
+     {
+         m_checkpointPending.store(true, std::memory_order_release);
+         return true;
+@@ -377,7 +389,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     }
+ 
+     const GuestThread *running = currentThread();
+-    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
++    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority) && !interruptInvocationActive())
+     {
+         m_rescheduleRequested = true;
+         m_timeSliceExpired = true;
+@@ -388,6 +400,44 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     return false;
+ }
+ 
++bool EeScheduler::pacingHoldActive() const noexcept
++{
++    if (m_pacingHoldUntil == std::chrono::steady_clock::time_point{})
++    {
++        return false;
++    }
++    return std::chrono::steady_clock::now() < m_pacingHoldUntil;
++}
++
++void EeScheduler::syncCyclesToHostClock() noexcept
++{
++    const auto now = std::chrono::steady_clock::now();
++    if (m_hostClockAnchor == std::chrono::steady_clock::time_point{})
++    {
++        m_hostClockAnchor = now;
++        m_eeCycleAnchor = m_eeCycle;
++        return;
++    }
++    const auto hostElapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - m_hostClockAnchor);
++    const uint64_t hostCycles = microsecondsToEeCycles(static_cast<uint64_t>(std::max<int64_t>(0, hostElapsed.count())));
++    const uint64_t guestCycles = m_eeCycle - m_eeCycleAnchor;
++    // Only catch up when the guest clock lags; a pause (debugger, window drag) is capped at a few frames.
++    constexpr uint64_t kMinDeficitCycles = 2048u;
++    constexpr uint64_t kMaxCatchUpCycles = microsecondsToEeCycles(50000u);
++    if (hostCycles > guestCycles + kMinDeficitCycles)
++    {
++        uint64_t remaining = std::min<uint64_t>(hostCycles - guestCycles, kMaxCatchUpCycles);
++        while (remaining > 0u)
++        {
++            const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
++            accountCycles(step);
++            remaining -= step;
++        }
++    }
++    m_hostClockAnchor = now;
++    m_eeCycleAnchor = m_eeCycle;
++}
++
+ void EeScheduler::accountCycles(uint32_t cycles) noexcept
+ {
+     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+@@ -423,7 +473,7 @@ void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_
+ int EeScheduler::createThread(const EeThreadCreateParams &params)
+ {
+     assertExecutor();
+-    if (params.priority < 1 || params.priority >= kPriorityCount)
++    if (params.priority < 0 || params.priority >= kPriorityCount) // kernel real: 0..127, 0 = la mas alta
+     {
+         return KE_ILLEGAL_PRIORITY;
+     }
+@@ -701,7 +751,7 @@ int EeScheduler::cancelWakeup(int id)
+ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &oldPriority)
+ {
+     assertExecutor();
+-    if (priority < 1 || priority >= kPriorityCount)
++    if (priority < 0 || priority >= kPriorityCount) // kernel real: 0..127
+     {
+         return KE_ILLEGAL_PRIORITY;
+     }
+@@ -1237,19 +1287,24 @@ int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
+ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
+ {
+     assertExecutor();
+-    if (cause < 32u)
++    // Kernel real: Enable/Disable{Intc,Dmac} devuelve 1 si el estado cambio y 0 si ya estaba asi.
++    // Hay juegos que hacen "prev = DisableIntc(c); ...; if (prev == 1) EnableIntc(c);".
++    if (cause >= 32u)
+     {
+-        uint32_t &mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
+-        if (enabled)
+-        {
+-            mask |= 1u << cause;
+-        }
+-        else
+-        {
+-            mask &= ~(1u << cause);
+-        }
++        return 0;
+     }
+-    return KE_OK;
++    uint32_t &mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
++    const uint32_t bit = 1u << cause;
++    const bool wasEnabled = (mask & bit) != 0u;
++    if (enabled)
++    {
++        mask |= bit;
++    }
++    else
++    {
++        mask &= ~bit;
++    }
++    return wasEnabled != enabled ? 1 : 0;
+ }
+ 
+ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
+@@ -1720,12 +1775,27 @@ void EeScheduler::requestPreemptionIfHigher(const GuestThread &readyThread, bool
+     }
+ }
+ 
++bool EeScheduler::interruptInvocationActive() const
++{
++    const GuestThread *running = currentThread();
++    return running != nullptr && !running->invocations.empty() &&
++           running->invocations.back().kind == GuestInvocationKind::Interrupt;
++}
++
+ void EeScheduler::applyPendingPreemption()
+ {
+     if (!m_rescheduleRequested)
+     {
+         return;
+     }
++    // An interrupt handler runs to completion on the real kernel: thread switches it requests (iWakeupThread,
++    // iChangeThreadPriority...) take effect when it returns. The handler spans several dispatches here, so
++    // keep the request pending until the invocation completes; otherwise another thread could suspend the
++    // interrupted thread with the handler half-run (ADXM usridle thread suspended inside ADXPS2_ExecVint).
++    if (interruptInvocationActive())
++    {
++        return;
++    }
+     if (m_currentThreadId == 0)
+     {
+         m_rescheduleRequested = false;
+@@ -1766,7 +1836,7 @@ void EeScheduler::processPendingEvents()
+     {
+         std::lock_guard lock(m_eventMutex);
+         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+-        const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
++        const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle && !pacingHoldActive();
+         const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+         m_checkpointPending.store(pendingWork, std::memory_order_release);
+     }
+@@ -1798,6 +1868,16 @@ void EeScheduler::processDueDeadlines()
+                 return;
+             }
+ 
++            if (now < pacingDeadline &&
++                (m_currentThreadId != 0 || hasReadyAtOrAbovePriority(kPriorityCount - 1) || !m_pendingInvocations.empty()))
++            {
++                // Guest work is available: hold the event until its host deadline instead of blocking the executor
++                // (blocking here ran one dispatch per event whenever the cycle clock was slightly ahead of the host).
++                m_pacingHoldUntil = pacingDeadline;
++                updateNextDeadline();
++                return;
++            }
++            m_pacingHoldUntil = {};
+             if (now < pacingDeadline)
+             {
+                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
+index b32e44a..072e343 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
+@@ -165,9 +165,26 @@ namespace ps2_stubs
+         TODO_NAMED("sceDmaRecvI", rdram, ctx, runtime);
+     }
+ 
++    // libdma sceDmaRecvN(d, addr, qwc): modo normal, direccion al EE (DIR=0, MODE=0), MADR solo si no es 0xFFFFFFFF (scratchpad).
+     void sceDmaRecvN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        TODO_NAMED("sceDmaRecvN", rdram, ctx, runtime);
++        if (!runtime)
++        {
++            setReturnS32(ctx, -1);
++            return;
++        }
++        PS2Memory &mem = runtime->memory();
++        const uint32_t channelBase = resolveDmaChannelBase(rdram, getRegU32(ctx, 4));
++        const uint32_t addr = getRegU32(ctx, 5);
++        const uint32_t qwc = getRegU32(ctx, 6);
++        const uint32_t oldChcr = mem.readIORegister(channelBase + 0x00u);
++        if (mem.readIORegister(channelBase + 0x10u) != 0xFFFFFFFFu)
++        {
++            mem.writeIORegister(channelBase + 0x10u, addr);
++        }
++        mem.writeIORegister(channelBase + 0x20u, qwc & 0xFFFFu);
++        mem.writeIORegister(channelBase + 0x00u, (oldChcr & ~0xFu) | 0x100u);
++        setReturnS32(ctx, 0);
+     }
+ 
+     void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index aed4cb5..bb6d7be 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -962,7 +962,9 @@ namespace ps2_stubs
+         const uint64_t smode2 =
+             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
+             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
+-        const uint64_t dispfb = makeDispFb(0u, fbw, psm, 0u, 0u);
++        const uint32_t fbp1 = fbw * ((h + 31u) / 32u);
++        const uint64_t dispfb = makeDispFb(fbp1, fbw, psm, 0u, 0u);
++        const uint64_t dispfb1 = makeDispFb(0u, fbw, psm, 0u, 0u);
+         const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
+ 
+         const int32_t drawWidth = static_cast<int32_t>(w);
+@@ -982,11 +984,12 @@ namespace ps2_stubs
+         db.disp[0].display = display;
+         db.disp[0].bgcolor = 0u;
+         db.disp[1] = db.disp[0];
++        db.disp[1].dispfb = dispfb1;
+ 
+         db.giftag0 = {makeGiftagAplusD(14u), 0x0E0E0E0E0E0E0E0EULL};
+         seedGsDrawEnv1(db.draw0, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+         db.giftag1 = db.giftag0;
+-        seedGsDrawEnv1(db.draw1, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
++        seedGsDrawEnv1(db.draw1, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
+ 
+         if (!writeGsDBuff(rdram, envAddr, db))
+         {
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+index 5110ee2..a57556d 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+@@ -112,7 +112,9 @@ namespace ps2_syscalls
+             const int priority = static_cast<int>(getRegU32(ctx, 5));
+             int oldPriority = 0;
+             const int result = ee.changePriority(id, priority, interruptSafe, oldPriority);
+-            setReturnS32(ctx, result);
++            // The EE kernel returns the previous priority on success. CRI ADXM locks by raising its own priority and
++            // saves this value to restore it in adxm_unlock; returning 0 left every ADXM thread at priority 0.
++            setReturnS32(ctx, result == 0 ? oldPriority : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+@@ -124,6 +126,10 @@ namespace ps2_syscalls
+             EeScheduler &ee = scheduler(rdram, ctx, runtime);
+             const int result = ee.rotateReadyQueue(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+             setReturnS32(ctx, result);
++            // A yield is cheap in guest cycles but expensive on the host; without a cost, threads that spin on
++            // RotateThreadReadyQueue starve the cycle-gated VBlank (~0.5 Hz in DotR's movie player).
++            // ponytail: flat cost, model real syscall/context-switch timing if a game becomes timing-sensitive.
++            ee.accountCycles(4096u);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+@@ -133,8 +139,11 @@ namespace ps2_syscalls
+                               bool interruptSafe)
+         {
+             EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-            const int result = ee.wakeupThread(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+-            setReturnS32(ctx, result);
++            // The EE kernel returns the thread id on success (not 0): CRI ADXM compares the value
++            // returned by ResumeThread/WakeupThread with the thread id before deciding what to do next.
++            const int id = static_cast<int>(getRegU32(ctx, 4));
++            const int result = ee.wakeupThread(id, interruptSafe);
++            setReturnS32(ctx, result == 0 ? id : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+@@ -313,16 +322,22 @@ namespace ps2_syscalls
+     void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-        const int result = ee.suspendThread(static_cast<int>(getRegU32(ctx, 4)), false);
+-        setReturnS32(ctx, result);
++        int id = static_cast<int>(getRegU32(ctx, 4));
++        if (id == 0)
++        {
++            id = ee.currentThreadId();
++        }
++        const int result = ee.suspendThread(id, false);
++        setReturnS32(ctx, result == 0 ? id : result); // the EE kernel returns the thread id on success
+         ee.transferIfRequested(false);
+     }
+ 
+     void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-        const int result = ee.resumeThread(static_cast<int>(getRegU32(ctx, 4)), false);
+-        setReturnS32(ctx, result);
++        const int id = static_cast<int>(getRegU32(ctx, 4));
++        const int result = ee.resumeThread(id, false);
++        setReturnS32(ctx, result == 0 ? id : result); // the EE kernel returns the thread id on success
+         ee.transferIfRequested(false);
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index f0ad507..0c2ce98 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -535,6 +535,9 @@ void GSCpuBackend::ResetUnlocked()
+     m_clut.fill(0u);
+     m_clutCbp.fill(0u);
+     m_texturePageCache.Invalidate();
++    m_completedFrames.clear();
++    m_drawnFbps.clear();
++    m_curDrawFbp = UINT32_MAX;
+     m_transfer = {};
+     m_transfer.direction = 3u;
+     m_transferState = {};
+@@ -548,9 +551,57 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!m_vram || batch.vertexCount == 0u)
+         return;
++    // la cache de pagina de textura no ve escrituras de draws/transferencias: invalidar
++    m_texturePageCache.Invalidate();
++    {
++        const uint32_t drawFbp = batch.state.context.frame.fbp;
++        if (drawFbp != m_curDrawFbp)
++        {
++            if (m_curDrawFbp != UINT32_MAX)
++                CaptureCompletedFrameUnlocked(m_curDrawFbp);
++            m_curDrawFbp = drawFbp;
++            m_drawnFbps.insert(drawFbp);
++        }
++        m_lastDrawTime = std::chrono::steady_clock::now();
++    }
+     DrawPrimitive(batch);
+ }
+ 
++void GSCpuBackend::CaptureCompletedFrameUnlocked(uint32_t fbp)
++{
++    constexpr uint32_t kMaxFrameBytes = 640u * 512u * 4u;
++    const uint32_t base = fbp * 8192u;
++    if (!m_vram || base >= m_vramSize)
++        return;
++    uint32_t len = std::min<uint32_t>(kMaxFrameBytes, m_vramSize - base);
++    for (const uint32_t other : m_drawnFbps) // no pisar otro framebuffer contiguo
++        if (other > fbp)
++            len = std::min<uint32_t>(len, (other - fbp) * 8192u);
++    CompletedFrame &frame = m_completedFrames[fbp];
++    frame.byteBase = base;
++    frame.bytes.assign(m_vram + base, m_vram + base + len);
++}
++
++void GSCpuBackend::OverlayCompletedFrames(std::vector<uint8_t> &snapshot, const GSPresentationRequest &request) const
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_curDrawFbp == UINT32_MAX)
++        return;
++    // si lleva un rato sin dibujar, el buffer esta completo y se muestra en vivo
++    if (std::chrono::steady_clock::now() - m_lastDrawTime > std::chrono::milliseconds(100))
++        return;
++    for (const uint64_t dispfb : {request.dispfb1, request.dispfb2})
++    {
++        const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFu);
++        if (fbp != m_curDrawFbp)
++            continue;
++        const auto it = m_completedFrames.find(fbp);
++        if (it == m_completedFrames.end() || it->second.byteBase + it->second.bytes.size() > snapshot.size())
++            continue;
++        std::memcpy(snapshot.data() + it->second.byteBase, it->second.bytes.data(), it->second.bytes.size());
++    }
++}
++
+ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+ {
+     std::lock_guard<std::mutex> lock(m_mutex);
+@@ -611,7 +662,8 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
+ 
+         if (tex0.csm == 0u)
+         {
+-            const uint32_t sourceIndex = swizzleClutIndexCSM1(entry);
++            // el intercambio de bits 3/4 solo existe en CLUT de 32 bits; en CT16 es raster lineal
++            const uint32_t sourceIndex = thirtyTwoBit ? swizzleClutIndexCSM1(entry) : entry;
+             sourceX = sourceIndex & 0x0Fu;
+             sourceY = sourceIndex >> 4u;
+         }
+@@ -1464,6 +1516,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
+ {
+     std::lock_guard<std::mutex> lock(m_mutex);
+     m_transfer = command;
++    m_texturePageCache.Invalidate();
+     m_transferState.x = command.trxpos.dsax;
+     m_transferState.y = command.trxpos.dsay;
+     m_transferState.totalPixels = static_cast<uint32_t>(command.trxreg.rrw) * static_cast<uint32_t>(command.trxreg.rrh);
+@@ -1482,6 +1535,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
+         return;
++    m_texturePageCache.Invalidate();
+     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
+         return;
+ 
+@@ -1851,6 +1905,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
+     SnapshotVram(snapshot);
+     if (snapshot.empty())
+         return {};
++    OverlayCompletedFrames(snapshot, request);
+ 
+     thread_local GSCpuBackend snapshotBackend;
+     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
+diff --git a/ps2xRuntime/src/lib/ipu/ps2_ipu.cpp b/ps2xRuntime/src/lib/ipu/ps2_ipu.cpp
+new file mode 100644
+index 0000000..ef53e18
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ipu/ps2_ipu.cpp
+@@ -0,0 +1,949 @@
++// Adapted from PS2Recomp-Fixer's IPU (third_party/fixer-ipu, GPL-3.0), itself derived from PCSX2's IPU (GPL-2.0+/GPL-3.0+)
++// and libmpeg2. This file keeps the original copyright notices; it is distributed under the GPL-3.0 terms.
++// Changes: removed the dodperf profiling include/scope.
++// [DoD] PS2 IPU model. The decoding paths (IDEC, FDEC, SETIQ, SETVQ, SETTH, CSC) follow PCSX2's
++// pcsx2/IPU/IPU.cpp, IPU_MultiISA.cpp, yuv2rgb.cpp and IPUdither.cpp (GPL-2.0+ / GPL-3.0+), which in turn are
++// based on libmpeg2 (Michel Lespinasse, Aaron Holtzman). See ps2_ipu.h for the model.
++
++#include "ps2_ipu.h"
++#include "ps2_ipu_vlc.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdio>
++#include <cstring>
++#include <mutex>
++
++namespace ps2_ipu
++{
++    namespace
++    {
++        constexpr uint32_t kCtrlEcd = 1u << 14;
++        constexpr uint32_t kCtrlScd = 1u << 15;
++        constexpr uint32_t kCtrlRst = 1u << 30;
++
++        enum Command : uint32_t
++        {
++            BCLR = 0,
++            IDEC = 1,
++            BDEC = 2,
++            VDEC = 3,
++            FDEC = 4,
++            SETIQ = 5,
++            SETVQ = 6,
++            CSC = 7,
++            PACK = 8,
++            SETTH = 9,
++        };
++
++        constexpr int kNonLinearQuantizerScale[32] = {
++            0, 1, 2, 3, 4, 5, 6, 7,
++            8, 10, 12, 14, 16, 18, 20, 22,
++            24, 28, 32, 36, 40, 44, 48, 52,
++            56, 64, 72, 80, 88, 96, 104, 112};
++
++        struct ScanTables
++        {
++            uint8_t norm[64];
++            uint8_t alt[64];
++        };
++
++        // Zig-zag / alternate scan, permuted for the IDCT below (PCSX2 make_scan_pack).
++        constexpr ScanTables makeScanTables()
++        {
++            constexpr uint8_t scanNorm[64] = {
++                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
++                12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
++                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
++                58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
++            constexpr uint8_t scanAlt[64] = {
++                0, 8, 16, 24, 1, 9, 2, 10, 17, 25, 32, 40, 48, 56, 57, 49,
++                41, 33, 26, 18, 3, 11, 4, 12, 19, 27, 34, 42, 50, 58, 35, 43,
++                51, 59, 20, 28, 5, 13, 6, 14, 21, 29, 36, 44, 52, 60, 37, 45,
++                53, 61, 22, 30, 7, 15, 23, 31, 38, 46, 54, 62, 39, 47, 55, 63};
++            ScanTables t{};
++            for (int i = 0; i < 64; ++i)
++            {
++                int j = scanNorm[i];
++                t.norm[i] = static_cast<uint8_t>(((j & 0x36) >> 1) | ((j & 0x09) << 2));
++                j = scanAlt[i];
++                t.alt[i] = static_cast<uint8_t>(((j & 0x36) >> 1) | ((j & 0x09) << 2));
++            }
++            return t;
++        }
++        constexpr ScanTables kScan = makeScanTables();
++
++        struct State
++        {
++            std::vector<uint8_t> in;
++            size_t bitPos = 0; // absolute bit index into `in`
++            bool underflow = false;
++
++            std::vector<uint8_t> out;
++            size_t outRead = 0;
++
++            uint32_t ctrl = 0;
++            uint32_t cmdData = 0;
++            uint32_t top = 0;
++            uint32_t command = 0xFFFFFFFFu;
++            bool busy = false;
++
++            uint8_t iq[64] = {};
++            uint8_t niq[64] = {};
++            uint16_t vqclut[16] = {};
++            uint16_t th0 = 0;
++            uint16_t th1 = 0;
++
++            // IDEC
++            int dcPred[3] = {128, 128, 128};
++            int quantizerScale = 0;
++            int intraDcPrecision = 0;
++            bool mpeg1 = false;
++            bool qScaleType = false;
++            bool intraVlcFormat = false;
++            bool alternateScan = false;
++            bool framePredFrameDct = true;
++            bool sgn = false;
++            bool dte = false;
++            bool ofm = false;
++            int idecPhase = 0;
++            int mbaCount = 0;
++
++            // CSC
++            uint32_t cscRemaining = 0;
++
++            Stats stats;
++        };
++
++        State g;
++        std::mutex g_mutex;
++
++        // ---- bitstream ----
++        size_t bitsAvailable()
++        {
++            const size_t total = g.in.size() * 8u;
++            return g.bitPos < total ? total - g.bitPos : 0u;
++        }
++
++        uint32_t ubits(unsigned n)
++        {
++            if (n == 0u)
++                return 0u;
++            if (bitsAvailable() < n)
++                g.underflow = true;
++            const size_t byte = g.bitPos >> 3;
++            const unsigned shift = static_cast<unsigned>(g.bitPos & 7u);
++            uint64_t acc = 0;
++            for (size_t i = 0; i < 5u; ++i)
++                acc = (acc << 8) | (byte + i < g.in.size() ? g.in[byte + i] : 0u);
++            return static_cast<uint32_t>((acc >> (40u - shift - n)) & ((1ull << n) - 1ull));
++        }
++
++        int32_t sbits(unsigned n)
++        {
++            const uint32_t v = ubits(n);
++            return static_cast<int32_t>(v << (32u - n)) >> (32u - n);
++        }
++
++        void dumpbits(unsigned n)
++        {
++            if (bitsAvailable() < n)
++                g.underflow = true;
++            g.bitPos += n;
++        }
++
++        uint32_t getbits(unsigned n)
++        {
++            const uint32_t v = ubits(n);
++            dumpbits(n);
++            return v;
++        }
++
++        void compactInput()
++        {
++            const size_t consumed = g.bitPos >> 3;
++            if (consumed >= (1u << 20) || (consumed > 0u && consumed == g.in.size()))
++            {
++                g.in.erase(g.in.begin(), g.in.begin() + static_cast<std::ptrdiff_t>(consumed));
++                g.bitPos -= consumed * 8u;
++            }
++        }
++
++        void emit(const uint8_t *data, size_t bytes)
++        {
++            g.out.insert(g.out.end(), data, data + bytes);
++            g.stats.outputBytes += bytes;
++        }
++
++        // ---- IDCT (PCSX2 IDCT_Block / IDCT_Copy) ----
++        constexpr int W1 = 2841;
++        constexpr int W2 = 2676;
++        constexpr int W3 = 2408;
++        constexpr int W5 = 1609;
++        constexpr int W6 = 1108;
++        constexpr int W7 = 565;
++
++        inline void butterfly(int &t0, int &t1, int w0, int w1, int d0, int d1)
++        {
++            const int tmp = w0 * (d0 + d1);
++            t0 = tmp + (w1 - w0) * d1;
++            t1 = tmp - (w1 + w0) * d0;
++        }
++
++        void idctBlock(int16_t *block)
++        {
++            for (int i = 0; i < 8; ++i)
++            {
++                int16_t *const r = block + 8 * i;
++                if (!(r[1] | r[2] | r[3] | r[4] | r[5] | r[6] | r[7]))
++                {
++                    const int16_t v = static_cast<int16_t>(static_cast<uint16_t>(r[0] << 3));
++                    for (int k = 0; k < 8; ++k)
++                        r[k] = v;
++                    continue;
++                }
++                int a0, a1, a2, a3;
++                {
++                    const int d0 = (r[0] << 11) + 128;
++                    const int d1 = r[1];
++                    const int d2 = r[2] << 11;
++                    const int d3 = r[3];
++                    const int t0 = d0 + d2;
++                    const int t1 = d0 - d2;
++                    int t2, t3;
++                    butterfly(t2, t3, W6, W2, d3, d1);
++                    a0 = t0 + t2;
++                    a1 = t1 + t3;
++                    a2 = t1 - t3;
++                    a3 = t0 - t2;
++                }
++                int b0, b1, b2, b3;
++                {
++                    const int d0 = r[4];
++                    const int d1 = r[5];
++                    const int d2 = r[6];
++                    const int d3 = r[7];
++                    int t0, t1, t2, t3;
++                    butterfly(t0, t1, W7, W1, d3, d0);
++                    butterfly(t2, t3, W3, W5, d1, d2);
++                    b0 = t0 + t2;
++                    b3 = t1 + t3;
++                    t0 -= t2;
++                    t1 -= t3;
++                    b1 = ((t0 + t1) * 181) >> 8;
++                    b2 = ((t0 - t1) * 181) >> 8;
++                }
++                r[0] = static_cast<int16_t>((a0 + b0) >> 8);
++                r[1] = static_cast<int16_t>((a1 + b1) >> 8);
++                r[2] = static_cast<int16_t>((a2 + b2) >> 8);
++                r[3] = static_cast<int16_t>((a3 + b3) >> 8);
++                r[4] = static_cast<int16_t>((a3 - b3) >> 8);
++                r[5] = static_cast<int16_t>((a2 - b2) >> 8);
++                r[6] = static_cast<int16_t>((a1 - b1) >> 8);
++                r[7] = static_cast<int16_t>((a0 - b0) >> 8);
++            }
++            for (int i = 0; i < 8; ++i)
++            {
++                int16_t *const c = block + i;
++                int a0, a1, a2, a3;
++                {
++                    const int d0 = (c[8 * 0] << 11) + 65536;
++                    const int d1 = c[8 * 1];
++                    const int d2 = c[8 * 2] << 11;
++                    const int d3 = c[8 * 3];
++                    const int t0 = d0 + d2;
++                    const int t1 = d0 - d2;
++                    int t2, t3;
++                    butterfly(t2, t3, W6, W2, d3, d1);
++                    a0 = t0 + t2;
++                    a1 = t1 + t3;
++                    a2 = t1 - t3;
++                    a3 = t0 - t2;
++                }
++                int b0, b1, b2, b3;
++                {
++                    const int d0 = c[8 * 4];
++                    const int d1 = c[8 * 5];
++                    const int d2 = c[8 * 6];
++                    const int d3 = c[8 * 7];
++                    int t0, t1, t2, t3;
++                    butterfly(t0, t1, W7, W1, d3, d0);
++                    butterfly(t2, t3, W3, W5, d1, d2);
++                    b0 = t0 + t2;
++                    b3 = t1 + t3;
++                    t0 = (t0 - t2) >> 8;
++                    t1 = (t1 - t3) >> 8;
++                    b1 = (t0 + t1) * 181;
++                    b2 = (t0 - t1) * 181;
++                }
++                c[8 * 0] = static_cast<int16_t>((a0 + b0) >> 17);
++                c[8 * 1] = static_cast<int16_t>((a1 + b1) >> 17);
++                c[8 * 2] = static_cast<int16_t>((a2 + b2) >> 17);
++                c[8 * 3] = static_cast<int16_t>((a3 + b3) >> 17);
++                c[8 * 4] = static_cast<int16_t>((a3 - b3) >> 17);
++                c[8 * 5] = static_cast<int16_t>((a2 - b2) >> 17);
++                c[8 * 6] = static_cast<int16_t>((a1 - b1) >> 17);
++                c[8 * 7] = static_cast<int16_t>((a0 - b0) >> 17);
++            }
++        }
++
++        void idctCopy(int16_t *block, uint8_t *dest, int stride)
++        {
++            idctBlock(block);
++            for (int i = 0; i < 8; ++i)
++            {
++                for (int k = 0; k < 8; ++k)
++                    dest[k] = static_cast<uint8_t>(std::clamp<int>(block[i * 8 + k], 0, 255));
++                dest += stride;
++            }
++        }
++
++        // ---- VLC decoding (PCSX2 IPU_MultiISA.cpp) ----
++        int lumaDcDiff()
++        {
++            int size;
++            uint32_t code = ubits(5);
++            if (code < 31u)
++            {
++                size = DCtable.lum0[code].size;
++                dumpbits(DCtable.lum0[code].len);
++            }
++            else
++            {
++                code = ubits(9) - 0x1f0u;
++                size = DCtable.lum1[code & 15u].size;
++                dumpbits(DCtable.lum1[code & 15u].len);
++            }
++            if (size == 0)
++                return 0;
++            int diff = static_cast<int>(getbits(static_cast<unsigned>(size)));
++            if ((diff & (1 << (size - 1))) == 0)
++                diff -= (1 << size) - 1;
++            return diff;
++        }
++
++        int chromaDcDiff()
++        {
++            int size;
++            uint32_t code = ubits(5);
++            if (code < 31u)
++            {
++                size = DCtable.chrom0[code].size;
++                dumpbits(DCtable.chrom0[code].len);
++            }
++            else
++            {
++                code = ubits(10) - 0x3e0u;
++                size = DCtable.chrom1[code & 31u].size;
++                dumpbits(DCtable.chrom1[code & 31u].len);
++            }
++            if (size == 0)
++                return 0;
++            int diff = static_cast<int>(getbits(static_cast<unsigned>(size)));
++            if ((diff & (1 << (size - 1))) == 0)
++                diff -= (1 << size) - 1;
++            return diff;
++        }
++
++        inline void saturate(int &val)
++        {
++            if (static_cast<uint32_t>(val + 2048) > 4095u)
++                val = (val >> 31) ^ 2047;
++        }
++
++        void getIntraBlock(int16_t *dest)
++        {
++            const uint8_t *scan = g.alternateScan ? kScan.alt : kScan.norm;
++            const int qs = g.quantizerScale;
++            const bool tableOne = g.intraVlcFormat && !g.mpeg1;
++            for (int i = 1;; ++i)
++            {
++                if (g.underflow)
++                    return;
++                const uint32_t code = ubits(16);
++                const DCTtab *tab = nullptr;
++                if (code >= 16384u && !tableOne)
++                    tab = &DCT.next[(code >> 12) - 4u];
++                else if (code >= 1024u)
++                    tab = tableOne ? &DCT.tab0a[(code >> 8) - 4u] : &DCT.tab0[(code >> 8) - 4u];
++                else if (code >= 512u)
++                    tab = tableOne ? &DCT.tab1a[(code >> 6) - 8u] : &DCT.tab1[(code >> 6) - 8u];
++                else if (code >= 256u)
++                    tab = &DCT.tab2[(code >> 4) - 16u];
++                else if (code >= 128u)
++                    tab = &DCT.tab3[(code >> 3) - 16u];
++                else if (code >= 64u)
++                    tab = &DCT.tab4[(code >> 2) - 16u];
++                else if (code >= 32u)
++                    tab = &DCT.tab5[(code >> 1) - 16u];
++                else if (code >= 16u)
++                    tab = &DCT.tab6[code - 16u];
++                else
++                    return;
++
++                dumpbits(tab->len);
++                if (tab->run == 64u) // end_of_block
++                    return;
++                i += (tab->run == 65u) ? static_cast<int>(getbits(6)) : tab->run;
++                if (i >= 64)
++                    return;
++
++                const int j = scan[i];
++                int val;
++                if (tab->run == 65u) // escape
++                {
++                    if (!g.mpeg1)
++                    {
++                        val = (sbits(12) * qs * g.iq[i]) >> 4;
++                        dumpbits(12);
++                    }
++                    else
++                    {
++                        val = sbits(8);
++                        dumpbits(8);
++                        if (!(val & 0x7f))
++                            val = static_cast<int>(getbits(8)) + 2 * val;
++                        val = (val * qs * g.iq[i]) >> 4;
++                        val = (val + ~(val >> 31)) | 1;
++                    }
++                }
++                else
++                {
++                    val = (tab->level * qs * g.iq[i]) >> 4;
++                    if (g.mpeg1)
++                        val = (val - 1) | 1; // oddification
++                    const int bit1 = sbits(1);
++                    val = (val ^ bit1) - bit1;
++                    dumpbits(1);
++                }
++                saturate(val);
++                dest[j] = static_cast<int16_t>(val);
++            }
++        }
++
++        void intraBlock(int cc, uint8_t *dest, int stride)
++        {
++            int16_t block[64] = {};
++            if (cc == 0)
++                g.dcPred[0] += lumaDcDiff();
++            else
++                g.dcPred[cc] += chromaDcDiff();
++            block[0] = static_cast<int16_t>(g.dcPred[cc] << (3 - g.intraDcPrecision));
++            getIntraBlock(block);
++            idctCopy(block, dest, stride);
++        }
++
++        // ---- colour conversion (PCSX2 yuv2rgb_reference, ipu_csc, ipu_dither_reference) ----
++        void yuvToRgb32(const uint8_t *Y, const uint8_t *Cb, const uint8_t *Cr, uint8_t *rgba)
++        {
++            for (int y = 0; y < 16; ++y)
++            {
++                for (int x = 0; x < 16; ++x)
++                {
++                    const int cr = static_cast<int>(Cr[(y >> 1) * 8 + (x >> 1)]) - 128;
++                    const int cb = static_cast<int>(Cb[(y >> 1) * 8 + (x >> 1)]) - 128;
++                    const int lum = (0x95 * std::max(0, static_cast<int>(Y[y * 16 + x]) - 16)) >> 6;
++                    const int rcr = (0xcc * cr) >> 6;
++                    const int gcr = (-0x68 * cr) >> 6;
++                    const int gcb = (-0x32 * cb) >> 6;
++                    const int bcb = (0x102 * cb) >> 6;
++                    uint8_t *p = rgba + (y * 16 + x) * 4;
++                    p[0] = static_cast<uint8_t>(std::clamp((lum + rcr + 1) >> 1, 0, 255));
++                    p[1] = static_cast<uint8_t>(std::clamp((lum + gcr + gcb + 1) >> 1, 0, 255));
++                    p[2] = static_cast<uint8_t>(std::clamp((lum + bcb + 1) >> 1, 0, 255));
++                    p[3] = 0x80;
++                }
++            }
++            if (g.th0 > 0)
++            {
++                for (int i = 0; i < 256; ++i)
++                {
++                    uint8_t *p = rgba + i * 4;
++                    if (p[0] < g.th0 && p[1] < g.th0 && p[2] < g.th0)
++                        std::memset(p, 0, 4);
++                    else if (p[0] < g.th1 && p[1] < g.th1 && p[2] < g.th1)
++                        p[3] = 0x40;
++                }
++            }
++            else if (g.th1 > 0)
++            {
++                for (int i = 0; i < 256; ++i)
++                {
++                    uint8_t *p = rgba + i * 4;
++                    if (p[0] < g.th1 && p[1] < g.th1 && p[2] < g.th1)
++                        p[3] = 0x40;
++                }
++            }
++        }
++
++        void emitMacroblock(uint8_t *rgba, bool sgn, bool ofm, bool dte)
++        {
++            if (sgn)
++            {
++                for (int i = 0; i < 256; ++i)
++                {
++                    rgba[i * 4 + 0] ^= 0x80;
++                    rgba[i * 4 + 1] ^= 0x80;
++                    rgba[i * 4 + 2] ^= 0x80;
++                }
++            }
++            if (!ofm)
++            {
++                emit(rgba, 1024u);
++                return;
++            }
++            static const int kDither[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
++            uint8_t rgb16[512];
++            for (int i = 0; i < 16; ++i)
++            {
++                for (int j = 0; j < 16; ++j)
++                {
++                    const uint8_t *p = rgba + (i * 16 + j) * 4;
++                    const int d = dte ? kDither[i & 3][j & 3] : 0;
++                    const int r = std::clamp(p[0] + d, 0, 255) >> 3;
++                    const int gg = std::clamp(p[1] + d, 0, 255) >> 3;
++                    const int b = std::clamp(p[2] + d, 0, 255) >> 3;
++                    const uint16_t v = static_cast<uint16_t>(r | (gg << 5) | (b << 10) | ((p[3] == 0x40) ? 0x8000 : 0));
++                    rgb16[(i * 16 + j) * 2 + 0] = static_cast<uint8_t>(v);
++                    rgb16[(i * 16 + j) * 2 + 1] = static_cast<uint8_t>(v >> 8);
++                }
++            }
++            emit(rgb16, sizeof(rgb16));
++        }
++
++        void resetDcPredictors()
++        {
++            g.dcPred[0] = g.dcPred[1] = g.dcPred[2] = 128 << g.intraDcPrecision;
++        }
++
++        // One intra macroblock (IDEC). Returns false when the input ran out (state rolled back by the caller).
++        bool idecMacroblock()
++        {
++            int modes = 0;
++            {
++                const uint32_t v = ubits(2);
++                if (v != 0u)
++                {
++                    const MBtab &tab = MB_I[v >> 1];
++                    dumpbits(tab.len);
++                    modes = tab.modes;
++                    if (!g.framePredFrameDct)
++                        modes |= static_cast<int>(getbits(1)) * DCT_TYPE_INTERLACED;
++                }
++            }
++            if (modes & MACROBLOCK_QUANT)
++            {
++                const uint32_t qsc = getbits(5);
++                g.quantizerScale = g.qScaleType ? kNonLinearQuantizerScale[qsc] : static_cast<int>(qsc << 1);
++            }
++
++            uint8_t Y[256] = {};
++            uint8_t Cb[64] = {};
++            uint8_t Cr[64] = {};
++            const bool interlaced = (modes & DCT_TYPE_INTERLACED) != 0;
++            const int dctOffset = interlaced ? 16 : 16 * 8;
++            const int dctStride = interlaced ? 32 : 16;
++            intraBlock(0, Y, dctStride);
++            intraBlock(0, Y + 8, dctStride);
++            intraBlock(0, Y + dctOffset, dctStride);
++            intraBlock(0, Y + dctOffset + 8, dctStride);
++            intraBlock(1, Cb, 8);
++            intraBlock(2, Cr, 8);
++            if (g.underflow)
++                return false;
++
++            uint8_t rgba[1024];
++            yuvToRgb32(Y, Cb, Cr, rgba);
++            emitMacroblock(rgba, g.sgn, g.ofm, g.dte);
++            ++g.stats.macroblocks;
++            return true;
++        }
++
++        // IDEC as a resumable state machine: 0 macroblock, 1 address increment, 2 end of slice.
++        bool runIdec()
++        {
++            for (;;)
++            {
++                if (g.idecPhase == 0)
++                {
++                    const size_t savedPos = g.bitPos;
++                    int savedDc[3] = {g.dcPred[0], g.dcPred[1], g.dcPred[2]};
++                    const int savedQs = g.quantizerScale;
++                    const size_t savedOut = g.out.size();
++                    g.underflow = false;
++                    if (!idecMacroblock())
++                    {
++                        g.bitPos = savedPos;
++                        std::memcpy(g.dcPred, savedDc, sizeof(savedDc));
++                        g.quantizerScale = savedQs;
++                        g.out.resize(savedOut);
++                        g.underflow = false;
++                        return false;
++                    }
++                    g.mbaCount = 0;
++                    g.idecPhase = 1;
++                }
++                if (g.idecPhase == 1)
++                {
++                    const size_t savedPos = g.bitPos;
++                    const int savedCount = g.mbaCount;
++                    g.underflow = false;
++                    const MBAtab *mba = nullptr;
++                    bool endOfSlice = false;
++                    for (;;)
++                    {
++                        const uint32_t code = ubits(16);
++                        if (code >= 0x1000u)
++                        {
++                            mba = &MBA.mba5[ubits(5) - 2u];
++                            break;
++                        }
++                        if (code >= 0x0300u)
++                        {
++                            mba = &MBA.mba11[ubits(11) - 24u];
++                            break;
++                        }
++                        const uint32_t c11 = ubits(11);
++                        if (c11 == 8u) // macroblock_escape
++                        {
++                            g.mbaCount += 33;
++                            dumpbits(11);
++                            if (g.underflow)
++                                break;
++                            continue;
++                        }
++                        if (c11 == 15u) // macroblock_stuffing
++                        {
++                            dumpbits(11);
++                            if (g.underflow)
++                                break;
++                            continue;
++                        }
++                        endOfSlice = true;
++                        break;
++                    }
++                    if (g.underflow)
++                    {
++                        g.bitPos = savedPos;
++                        g.mbaCount = savedCount;
++                        g.underflow = false;
++                        return false;
++                    }
++                    if (endOfSlice)
++                    {
++                        g.idecPhase = 2;
++                    }
++                    else
++                    {
++                        dumpbits(mba->len);
++                        g.mbaCount += mba->mba;
++                        if (g.mbaCount)
++                            resetDcPredictors();
++                        g.idecPhase = 0;
++                        continue;
++                    }
++                }
++                // end of slice: find the next start code, then load TOP
++                {
++                    const size_t savedPos = g.bitPos;
++                    g.ctrl &= ~kCtrlScd;
++                    if (bitsAvailable() < 8u)
++                        return false;
++                    if (ubits(8) == 0u)
++                    {
++                        g.bitPos = (g.bitPos + 7u) & ~static_cast<size_t>(7u);
++                        for (;;)
++                        {
++                            if (bitsAvailable() < 24u)
++                            {
++                                g.bitPos = savedPos;
++                                return false;
++                            }
++                            const uint32_t startCheck = ubits(24);
++                            if (startCheck != 0u)
++                            {
++                                if (startCheck == 1u)
++                                    g.ctrl |= kCtrlScd;
++                                else
++                                    g.ctrl |= kCtrlEcd;
++                                break;
++                            }
++                            g.bitPos += 8u;
++                        }
++                    }
++                    if (bitsAvailable() < 32u)
++                    {
++                        g.bitPos = savedPos;
++                        return false;
++                    }
++                    g.top = ubits(32);
++                    return true;
++                }
++            }
++        }
++
++        bool runCsc()
++        {
++            const bool ofm = (g.command >> 27) & 1u;
++            const bool dte = (g.command >> 26) & 1u;
++            while (g.cscRemaining != 0u)
++            {
++                if (bitsAvailable() < 384u * 8u)
++                    return false;
++                uint8_t Y[256], Cb[64], Cr[64];
++                for (uint8_t &b : Y)
++                    b = static_cast<uint8_t>(getbits(8));
++                for (uint8_t &b : Cb)
++                    b = static_cast<uint8_t>(getbits(8));
++                for (uint8_t &b : Cr)
++                    b = static_cast<uint8_t>(getbits(8));
++                uint8_t rgba[1024];
++                yuvToRgb32(Y, Cb, Cr, rgba);
++                emitMacroblock(rgba, false, ofm, dte);
++                --g.cscRemaining;
++            }
++            return true;
++        }
++
++        // Runs the current command as far as the input allows; clears busy when it completes.
++        void run()
++        {
++            if (!g.busy)
++                return;
++            bool done = false;
++            switch (g.command >> 28)
++            {
++            case IDEC:
++                done = runIdec();
++                break;
++            case FDEC:
++                if (bitsAvailable() >= 32u)
++                {
++                    g.cmdData = ubits(32);
++                    g.top = g.cmdData;
++                    done = true;
++                }
++                break;
++            case SETIQ:
++                if (bitsAvailable() >= 512u)
++                {
++                    uint8_t *table = ((g.command >> 27) & 1u) ? g.niq : g.iq;
++                    for (int i = 0; i < 64; ++i)
++                        table[i] = static_cast<uint8_t>(getbits(8));
++                    done = true;
++                }
++                break;
++            case SETVQ:
++                if (bitsAvailable() >= 256u)
++                {
++                    for (uint16_t &v : g.vqclut)
++                    {
++                        const uint32_t lo = getbits(8);
++                        const uint32_t hi = getbits(8);
++                        v = static_cast<uint16_t>(lo | (hi << 8));
++                    }
++                    done = true;
++                }
++                break;
++            case CSC:
++                done = runCsc();
++                break;
++            default:
++                done = true;
++                break;
++            }
++            if (done)
++            {
++                g.busy = false;
++                compactInput();
++            }
++        }
++
++        void softReset()
++        {
++            g.in.clear();
++            g.bitPos = 0;
++            g.out.clear();
++            g.outRead = 0;
++            g.th0 = g.th1 = 0;
++            if (g.intraDcPrecision == 0)
++                resetDcPredictors();
++            g.ctrl &= 0x7F33F00u;
++            g.top = 0;
++            g.command = 0xFFFFFFFFu;
++            g.busy = false;
++            g.cmdData = 0;
++        }
++
++        void writeCommand(uint32_t value)
++        {
++            ++g.stats.commands;
++            g.ctrl &= ~(kCtrlEcd | kCtrlScd);
++            g.command = value;
++            const uint32_t fb = value & 0x3Fu;
++            switch (value >> 28)
++            {
++            case BCLR:
++                g.in.clear();
++                g.bitPos = value & 0x7Fu;
++                g.busy = false;
++                return;
++            case SETTH:
++                g.th0 = static_cast<uint16_t>(value & 0x1FFu);
++                g.th1 = static_cast<uint16_t>((value >> 16) & 0x1FFu);
++                g.busy = false;
++                return;
++            case IDEC:
++                dumpbits(fb);
++                g.ctrl = (g.ctrl & ~(7u << 24)) | (1u << 24); // PCT = I picture
++                g.mpeg1 = (g.ctrl >> 23) & 1u;
++                g.qScaleType = (g.ctrl >> 22) & 1u;
++                g.intraVlcFormat = (g.ctrl >> 21) & 1u;
++                g.alternateScan = (g.ctrl >> 20) & 1u;
++                g.intraDcPrecision = static_cast<int>((g.ctrl >> 16) & 3u);
++                g.quantizerScale = static_cast<int>((value >> 16) & 0x1Fu); // as PCSX2 (raw QSC until a QUANT macroblock)
++                g.framePredFrameDct = ((value >> 24) & 1u) == 0u;
++                g.sgn = (value >> 25) & 1u;
++                g.dte = (value >> 26) & 1u;
++                g.ofm = (value >> 27) & 1u;
++                resetDcPredictors();
++                g.top = 0;
++                g.idecPhase = 0;
++                g.mbaCount = 0;
++                break;
++            case FDEC:
++            case SETIQ:
++            case VDEC:
++            case BDEC:
++                dumpbits(fb);
++                break;
++            case CSC:
++                g.cscRemaining = value & 0x7FFu;
++                break;
++            default:
++                break;
++            }
++            g.underflow = false;
++            g.busy = true;
++            const uint32_t cmd = value >> 28;
++            if (cmd == BDEC || cmd == VDEC || cmd == PACK)
++            {
++                static int s_warned = 0;
++                if (s_warned++ < 8)
++                    std::fprintf(stderr, "[ipu] command %u (0x%08X) is not emulated yet\n", cmd, value);
++                ++g.stats.errors;
++                g.cmdData = 0;
++                g.busy = false;
++                return;
++            }
++            run();
++        }
++    }
++
++    void reset()
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        g = State{};
++    }
++
++    uint32_t read32(uint32_t offset)
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        const size_t inQw = bitsAvailable() / 128u;
++        const size_t outQw = (g.out.size() - g.outRead) / 16u;
++        switch (offset & 0xFFu)
++        {
++        case 0x00:
++        {
++            const uint32_t cmd = g.command >> 28;
++            if (cmd != FDEC && cmd != VDEC && bitsAvailable() >= 32u)
++                g.cmdData = ubits(32);
++            return g.cmdData;
++        }
++        case 0x04:
++            return g.busy ? 0x80000000u : 0u;
++        case 0x10:
++        {
++            uint32_t v = g.ctrl & ~0xFFu & ~(1u << 31);
++            v |= static_cast<uint32_t>(std::min<size_t>(inQw, 8u));
++            v |= static_cast<uint32_t>(std::min<size_t>(outQw, 8u)) << 4;
++            if (g.busy)
++                v |= 1u << 31;
++            return v;
++        }
++        case 0x20:
++            return static_cast<uint32_t>(g.bitPos & 0x7Fu) |
++                   (static_cast<uint32_t>(std::min<size_t>(inQw, 8u)) << 8) |
++                   (static_cast<uint32_t>(std::min<size_t>(inQw, 2u)) << 16);
++        case 0x30:
++            return g.top;
++        case 0x34:
++            return g.busy ? 0x80000000u : 0u;
++        default:
++            return 0u;
++        }
++    }
++
++    void write32(uint32_t offset, uint32_t value)
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        switch (offset & 0xFFu)
++        {
++        case 0x00:
++            writeCommand(value);
++            break;
++        case 0x10:
++            g.ctrl = (value & 0x47f30000u) | (g.ctrl & 0x8000ffffu);
++            if (((g.ctrl >> 16) & 3u) == 3u)
++                g.ctrl = (g.ctrl & ~(3u << 16)) | (1u << 16);
++            if (g.ctrl & kCtrlRst)
++            {
++                g.ctrl &= ~kCtrlRst;
++                softReset();
++            }
++            break;
++        default:
++            break;
++        }
++    }
++
++    void pushInput(const uint8_t *data, size_t bytes)
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        {
++            // [DoD] DOD_IPU_INDUMP=<file>: the IPU input stream as it arrives (first 8 MB).
++            static FILE *dump = []() -> FILE * { const char *v = std::getenv("DOD_IPU_INDUMP"); return v ? std::fopen(v, "wb") : nullptr; }();
++            static size_t dumped = 0;
++            if (dump && dumped < (8u << 20)) { std::fwrite(data, 1, bytes, dump); std::fflush(dump); dumped += bytes; }
++        }
++        g.in.insert(g.in.end(), data, data + bytes);
++        g.stats.inputBytes += bytes;
++        run();
++    }
++
++    size_t outputBytes()
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        return g.out.size() - g.outRead;
++    }
++
++    size_t popOutput(uint8_t *dst, size_t bytes)
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        const size_t n = std::min(bytes, g.out.size() - g.outRead);
++        std::memcpy(dst, g.out.data() + g.outRead, n);
++        g.outRead += n;
++        if (g.outRead == g.out.size())
++        {
++            g.out.clear();
++            g.outRead = 0;
++        }
++        return n;
++    }
++
++    Stats stats()
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        return g.stats;
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ipu/ps2_ipu.h b/ps2xRuntime/src/lib/ipu/ps2_ipu.h
+new file mode 100644
+index 0000000..8c2cc70
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ipu/ps2_ipu.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++// [DoD] PS2 IPU (MPEG-2 decoder) for the runtime: registers 0x10002000-0x10002030, the input FIFO fed by
++// DMA channel 4 (toIPU) or 0x10007010, and the output FIFO drained by DMA channel 3 (fromIPU) or 0x10007000.
++// The decoding follows PCSX2's IPU (pcsx2/IPU/IPU_MultiISA.cpp, GPL-2.0+), which is based on libmpeg2.
++//
++// Model: commands run as soon as they are written, as far as the input already received allows; a command that
++// runs out of input stays busy and resumes when more input arrives. Output is queued without the 8-qword
++// FIFO limit, so a DMA from the IPU can take as much as has been decoded.
++
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace ps2_ipu
++{
++    void reset();
++
++    // Register offsets relative to 0x10002000: 0x00/0x04 IPU_CMD (data, busy), 0x10 IPU_CTRL, 0x20 IPU_BP,
++    // 0x30/0x34 IPU_TOP (data, busy).
++    uint32_t read32(uint32_t offset);
++    void write32(uint32_t offset, uint32_t value);
++
++    void pushInput(const uint8_t *data, size_t bytes);
++    size_t outputBytes();
++    size_t popOutput(uint8_t *dst, size_t bytes);
++
++    // Diagnostics for --trace.
++    struct Stats
++    {
++        uint64_t commands = 0;
++        uint64_t macroblocks = 0;
++        uint64_t inputBytes = 0;
++        uint64_t outputBytes = 0;
++        uint64_t errors = 0;
++    };
++    Stats stats();
++}
+diff --git a/ps2xRuntime/src/lib/ipu/ps2_ipu_vlc.h b/ps2xRuntime/src/lib/ipu/ps2_ipu_vlc.h
+new file mode 100644
+index 0000000..d458d08
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ipu/ps2_ipu_vlc.h
+@@ -0,0 +1,469 @@
++// [DoD] Copied from PCSX2 pcsx2/IPU/mpeg2_vlc.h (GPL-2.0+) for ps2_ipu.cpp; only the s8 cast was changed.
++// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
++// SPDX-License-Identifier: GPL-2.0+
++
++/* NOTE: While part of this header is originally from libmpeg2, which is GPL - licensed,
++ * it's not substantial and does not contain any functions, therefore can be argued
++ * not to be a derived work. See http://lkml.iu.edu/hypermail/linux/kernel/0301.1/0362.html
++ * The constants themselves can also be argued to be part of the MPEG-2 standard, whose
++ * patents expired worldwide in Feb 2020.
++ *
++ * Original copyright included for completeness:
++ *   Copyright (C) 2000-2002 Michel Lespinasse <walken@zoy.org>
++ *   Copyright (C) 1999-2000 Aaron Holtzman <aholtzma@ess.engr.uvic.ca>
++ */
++
++#pragma once
++#include <cstdint>
++
++#ifdef _MSC_VER
++#define VLC_ALIGNED16 __declspec(align(16))
++#else
++#define VLC_ALIGNED16 __attribute__((aligned(16)))
++#endif
++
++enum macroblock_modes
++{
++	MACROBLOCK_INTRA = 1,
++	MACROBLOCK_PATTERN = 2,
++	MACROBLOCK_MOTION_BACKWARD = 4,
++	MACROBLOCK_MOTION_FORWARD = 8,
++	MACROBLOCK_QUANT = 16,
++	DCT_TYPE_INTERLACED = 32
++};
++
++enum motion_type
++{
++	MOTION_TYPE_SHIFT = 6,
++	MOTION_TYPE_MASK = (3 * 64),
++	MOTION_TYPE_BASE = 64,
++	MC_FIELD = (1 * 64),
++	MC_FRAME = (2 * 64),
++	MC_16X8 = (2 * 64),
++	MC_DMV = (3 * 64)
++};
++
++/* picture structure */
++enum picture_structure
++{
++	TOP_FIELD = 1,
++	BOTTOM_FIELD = 2,
++	FRAME_PICTURE = 3
++};
++
++/* picture coding type */
++enum picture_coding_type
++{
++	I_TYPE = 1,
++	P_TYPE = 2,
++	B_TYPE = 3,
++	D_TYPE = 4
++};
++
++struct MBtab
++{
++	std::uint8_t modes;
++	std::uint8_t len;
++};
++
++struct MVtab
++{
++	std::uint8_t delta;
++	std::uint8_t len;
++};
++
++struct DMVtab
++{
++	std::int8_t dmv;
++	std::uint8_t len;
++};
++
++struct CBPtab
++{
++	std::uint8_t cbp;
++	std::uint8_t len;
++};
++
++struct DCtab
++{
++	std::uint8_t size;
++	std::uint8_t len;
++};
++
++struct DCTtab
++{
++	std::uint8_t run;
++	std::uint8_t level;
++	std::uint8_t len;
++};
++
++struct MBAtab
++{
++	std::uint8_t mba;
++	std::uint8_t len;
++};
++
++
++#define INTRA MACROBLOCK_INTRA
++#define QUANT MACROBLOCK_QUANT
++
++static constexpr MBtab MB_I[] = {
++	{INTRA | QUANT, 2}, {INTRA, 1}};
++
++#define MC MACROBLOCK_MOTION_FORWARD
++#define CODED MACROBLOCK_PATTERN
++
++static constexpr VLC_ALIGNED16 MBtab MB_P[] = {
++	{INTRA | QUANT, 6}, {CODED | QUANT, 5}, {MC | CODED | QUANT, 5}, {INTRA, 5},
++	{MC, 3}, {MC, 3}, {MC, 3}, {MC, 3},
++	{CODED, 2}, {CODED, 2}, {CODED, 2}, {CODED, 2},
++	{CODED, 2}, {CODED, 2}, {CODED, 2}, {CODED, 2},
++	{MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1},
++	{MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1},
++	{MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1},
++	{MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1}, {MC | CODED, 1}};
++
++#define FWD MACROBLOCK_MOTION_FORWARD
++#define BWD MACROBLOCK_MOTION_BACKWARD
++#define INTER MACROBLOCK_MOTION_FORWARD | MACROBLOCK_MOTION_BACKWARD
++
++static constexpr VLC_ALIGNED16 MBtab MB_B[] = {
++	{0, 0}, {INTRA | QUANT, 6},
++	{BWD | CODED | QUANT, 6}, {FWD | CODED | QUANT, 6},
++	{INTER | CODED | QUANT, 5}, {INTER | CODED | QUANT, 5},
++	{INTRA, 5}, {INTRA, 5},
++	{FWD, 4}, {FWD, 4}, {FWD, 4}, {FWD, 4},
++	{FWD | CODED, 4}, {FWD | CODED, 4}, {FWD | CODED, 4}, {FWD | CODED, 4},
++	{BWD, 3}, {BWD, 3}, {BWD, 3}, {BWD, 3},
++	{BWD, 3}, {BWD, 3}, {BWD, 3}, {BWD, 3},
++	{BWD | CODED, 3}, {BWD | CODED, 3}, {BWD | CODED, 3}, {BWD | CODED, 3},
++	{BWD | CODED, 3}, {BWD | CODED, 3}, {BWD | CODED, 3}, {BWD | CODED, 3},
++	{INTER, 2}, {INTER, 2}, {INTER, 2}, {INTER, 2},
++	{INTER, 2}, {INTER, 2}, {INTER, 2}, {INTER, 2},
++	{INTER, 2}, {INTER, 2}, {INTER, 2}, {INTER, 2},
++	{INTER, 2}, {INTER, 2}, {INTER, 2}, {INTER, 2},
++	{INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2},
++	{INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2},
++	{INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2},
++	{INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2}, {INTER | CODED, 2}};
++
++#undef INTRA
++#undef QUANT
++#undef MC
++#undef CODED
++#undef FWD
++#undef BWD
++#undef INTER
++
++
++static constexpr MVtab MV_4[] = {
++	{3, 6}, {2, 4}, {1, 3}, {1, 3}, {0, 2}, {0, 2}, {0, 2}, {0, 2}};
++
++static constexpr VLC_ALIGNED16 MVtab MV_10[] = {
++	{0, 10}, {0, 10}, {0, 10}, {0, 10}, {0, 10}, {0, 10}, {0, 10}, {0, 10},
++	{0, 10}, {0, 10}, {0, 10}, {0, 10}, {15, 10}, {14, 10}, {13, 10}, {12, 10},
++	{11, 10}, {10, 10}, {9, 9}, {9, 9}, {8, 9}, {8, 9}, {7, 9}, {7, 9},
++	{6, 7}, {6, 7}, {6, 7}, {6, 7}, {6, 7}, {6, 7}, {6, 7}, {6, 7},
++	{5, 7}, {5, 7}, {5, 7}, {5, 7}, {5, 7}, {5, 7}, {5, 7}, {5, 7},
++	{4, 7}, {4, 7}, {4, 7}, {4, 7}, {4, 7}, {4, 7}, {4, 7}, {4, 7}};
++
++
++static constexpr DMVtab DMV_2[] = {
++	{0, 1}, {0, 1}, {1, 2}, {static_cast<std::int8_t>(-1), 2}};
++
++
++static constexpr VLC_ALIGNED16 CBPtab CBP_7[] = {
++	{0x22, 7}, {0x12, 7}, {0x0a, 7}, {0x06, 7},
++	{0x21, 7}, {0x11, 7}, {0x09, 7}, {0x05, 7},
++	{0x3f, 6}, {0x3f, 6}, {0x03, 6}, {0x03, 6},
++	{0x24, 6}, {0x24, 6}, {0x18, 6}, {0x18, 6},
++	{0x3e, 5}, {0x3e, 5}, {0x3e, 5}, {0x3e, 5},
++	{0x02, 5}, {0x02, 5}, {0x02, 5}, {0x02, 5},
++	{0x3d, 5}, {0x3d, 5}, {0x3d, 5}, {0x3d, 5},
++	{0x01, 5}, {0x01, 5}, {0x01, 5}, {0x01, 5},
++	{0x38, 5}, {0x38, 5}, {0x38, 5}, {0x38, 5},
++	{0x34, 5}, {0x34, 5}, {0x34, 5}, {0x34, 5},
++	{0x2c, 5}, {0x2c, 5}, {0x2c, 5}, {0x2c, 5},
++	{0x1c, 5}, {0x1c, 5}, {0x1c, 5}, {0x1c, 5},
++	{0x28, 5}, {0x28, 5}, {0x28, 5}, {0x28, 5},
++	{0x14, 5}, {0x14, 5}, {0x14, 5}, {0x14, 5},
++	{0x30, 5}, {0x30, 5}, {0x30, 5}, {0x30, 5},
++	{0x0c, 5}, {0x0c, 5}, {0x0c, 5}, {0x0c, 5},
++	{0x20, 4}, {0x20, 4}, {0x20, 4}, {0x20, 4},
++	{0x20, 4}, {0x20, 4}, {0x20, 4}, {0x20, 4},
++	{0x10, 4}, {0x10, 4}, {0x10, 4}, {0x10, 4},
++	{0x10, 4}, {0x10, 4}, {0x10, 4}, {0x10, 4},
++	{0x08, 4}, {0x08, 4}, {0x08, 4}, {0x08, 4},
++	{0x08, 4}, {0x08, 4}, {0x08, 4}, {0x08, 4},
++	{0x04, 4}, {0x04, 4}, {0x04, 4}, {0x04, 4},
++	{0x04, 4}, {0x04, 4}, {0x04, 4}, {0x04, 4},
++	{0x3c, 3}, {0x3c, 3}, {0x3c, 3}, {0x3c, 3},
++	{0x3c, 3}, {0x3c, 3}, {0x3c, 3}, {0x3c, 3},
++	{0x3c, 3}, {0x3c, 3}, {0x3c, 3}, {0x3c, 3},
++	{0x3c, 3}, {0x3c, 3}, {0x3c, 3}, {0x3c, 3}};
++
++static constexpr VLC_ALIGNED16 CBPtab CBP_9[] = {
++	{0, 0}, {0x00, 9}, {0x27, 9}, {0x1b, 9},
++	{0x3b, 9}, {0x37, 9}, {0x2f, 9}, {0x1f, 9},
++	{0x3a, 8}, {0x3a, 8}, {0x36, 8}, {0x36, 8},
++	{0x2e, 8}, {0x2e, 8}, {0x1e, 8}, {0x1e, 8},
++	{0x39, 8}, {0x39, 8}, {0x35, 8}, {0x35, 8},
++	{0x2d, 8}, {0x2d, 8}, {0x1d, 8}, {0x1d, 8},
++	{0x26, 8}, {0x26, 8}, {0x1a, 8}, {0x1a, 8},
++	{0x25, 8}, {0x25, 8}, {0x19, 8}, {0x19, 8},
++	{0x2b, 8}, {0x2b, 8}, {0x17, 8}, {0x17, 8},
++	{0x33, 8}, {0x33, 8}, {0x0f, 8}, {0x0f, 8},
++	{0x2a, 8}, {0x2a, 8}, {0x16, 8}, {0x16, 8},
++	{0x32, 8}, {0x32, 8}, {0x0e, 8}, {0x0e, 8},
++	{0x29, 8}, {0x29, 8}, {0x15, 8}, {0x15, 8},
++	{0x31, 8}, {0x31, 8}, {0x0d, 8}, {0x0d, 8},
++	{0x23, 8}, {0x23, 8}, {0x13, 8}, {0x13, 8},
++	{0x0b, 8}, {0x0b, 8}, {0x07, 8}, {0x07, 8}};
++
++struct MBAtabSet
++{
++	MBAtab mba5[30];
++	MBAtab mba11[26 * 4];
++};
++static constexpr VLC_ALIGNED16 MBAtabSet MBA = {
++	{// mba5
++		{6, 5}, {5, 5}, {4, 4}, {4, 4}, {3, 4}, {3, 4},
++		{2, 3}, {2, 3}, {2, 3}, {2, 3}, {1, 3}, {1, 3}, {1, 3}, {1, 3},
++		{0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1},
++		{0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}},
++
++	{// mba11
++		{32, 11}, {31, 11}, {30, 11}, {29, 11},
++		{28, 11}, {27, 11}, {26, 11}, {25, 11},
++		{24, 11}, {23, 11}, {22, 11}, {21, 11},
++		{20, 10}, {20, 10}, {19, 10}, {19, 10},
++		{18, 10}, {18, 10}, {17, 10}, {17, 10},
++		{16, 10}, {16, 10}, {15, 10}, {15, 10},
++		{14, 8}, {14, 8}, {14, 8}, {14, 8},
++		{14, 8}, {14, 8}, {14, 8}, {14, 8},
++		{13, 8}, {13, 8}, {13, 8}, {13, 8},
++		{13, 8}, {13, 8}, {13, 8}, {13, 8},
++		{12, 8}, {12, 8}, {12, 8}, {12, 8},
++		{12, 8}, {12, 8}, {12, 8}, {12, 8},
++		{11, 8}, {11, 8}, {11, 8}, {11, 8},
++		{11, 8}, {11, 8}, {11, 8}, {11, 8},
++		{10, 8}, {10, 8}, {10, 8}, {10, 8},
++		{10, 8}, {10, 8}, {10, 8}, {10, 8},
++		{9, 8}, {9, 8}, {9, 8}, {9, 8},
++		{9, 8}, {9, 8}, {9, 8}, {9, 8},
++		{8, 7}, {8, 7}, {8, 7}, {8, 7},
++		{8, 7}, {8, 7}, {8, 7}, {8, 7},
++		{8, 7}, {8, 7}, {8, 7}, {8, 7},
++		{8, 7}, {8, 7}, {8, 7}, {8, 7},
++		{7, 7}, {7, 7}, {7, 7}, {7, 7},
++		{7, 7}, {7, 7}, {7, 7}, {7, 7},
++		{7, 7}, {7, 7}, {7, 7}, {7, 7},
++		{7, 7}, {7, 7}, {7, 7}, {7, 7}}};
++
++struct DCtabSet
++{
++	DCtab lum0[32]; // Table B-12, dct_dc_size_luminance, codes 00xxx ... 11110
++	DCtab lum1[16]; // Table B-12, dct_dc_size_luminance, codes 111110xxx ... 111111111
++	DCtab chrom0[32]; // Table B-13, dct_dc_size_chrominance, codes 00xxx ... 11110
++	DCtab chrom1[32]; // Table B-13, dct_dc_size_chrominance, codes 111110xxxx ... 1111111111
++};
++
++static constexpr VLC_ALIGNED16 DCtabSet DCtable =
++	{
++		// lum0: Table B-12, dct_dc_size_luminance, codes 00xxx ... 11110 */
++		{{1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2},
++			{2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2},
++			{0, 3}, {0, 3}, {0, 3}, {0, 3}, {3, 3}, {3, 3}, {3, 3}, {3, 3},
++			{4, 3}, {4, 3}, {4, 3}, {4, 3}, {5, 4}, {5, 4}, {6, 5}, {0, 0}},
++
++		/* lum1: Table B-12, dct_dc_size_luminance, codes 111110xxx ... 111111111 */
++		{{7, 6}, {7, 6}, {7, 6}, {7, 6}, {7, 6}, {7, 6}, {7, 6}, {7, 6},
++			{8, 7}, {8, 7}, {8, 7}, {8, 7}, {9, 8}, {9, 8}, {10, 9}, {11, 9}},
++
++		/* chrom0: Table B-13, dct_dc_size_chrominance, codes 00xxx ... 11110 */
++		{{0, 2}, {0, 2}, {0, 2}, {0, 2}, {0, 2}, {0, 2}, {0, 2}, {0, 2},
++			{1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2},
++			{2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2}, {2, 2},
++			{3, 3}, {3, 3}, {3, 3}, {3, 3}, {4, 4}, {4, 4}, {5, 5}, {0, 0}},
++
++		/* chrom1: Table B-13, dct_dc_size_chrominance, codes 111110xxxx ... 1111111111 */
++		{{6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6},
++			{6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6}, {6, 6},
++			{7, 7}, {7, 7}, {7, 7}, {7, 7}, {7, 7}, {7, 7}, {7, 7}, {7, 7},
++			{8, 8}, {8, 8}, {8, 8}, {8, 8}, {9, 9}, {9, 9}, {10, 10}, {11, 10}},
++};
++
++struct DCTtabSet
++{
++	DCTtab first[12];
++	DCTtab next[12];
++
++	DCTtab tab0[60];
++	DCTtab tab0a[252];
++	DCTtab tab1[8];
++	DCTtab tab1a[8];
++
++	DCTtab tab2[16];
++	DCTtab tab3[16];
++	DCTtab tab4[16];
++	DCTtab tab5[16];
++	DCTtab tab6[16];
++};
++
++static constexpr VLC_ALIGNED16 DCTtabSet DCT =
++	{
++		/* first[12]: Table B-14, DCT coefficients table zero,
++	 * codes 0100 ... 1xxx (used for first (DC) coefficient)
++	 */
++		{{0, 2, 4}, {2, 1, 4}, {1, 1, 3}, {1, 1, 3},
++			{0, 1, 1}, {0, 1, 1}, {0, 1, 1}, {0, 1, 1},
++			{0, 1, 1}, {0, 1, 1}, {0, 1, 1}, {0, 1, 1}},
++
++		/* next[12]: Table B-14, DCT coefficients table zero,
++	 * codes 0100 ... 1xxx (used for all other coefficients)
++	 */
++		{{0, 2, 4}, {2, 1, 4}, {1, 1, 3}, {1, 1, 3},
++			{64, 0, 2}, {64, 0, 2}, {64, 0, 2}, {64, 0, 2}, /* EOB */
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2}},
++
++		/* tab0[60]: Table B-14, DCT coefficients table zero,
++	 * codes 000001xx ... 00111xxx
++	 */
++		{{65, 0, 6}, {65, 0, 6}, {65, 0, 6}, {65, 0, 6}, /* Escape */
++			{2, 2, 7}, {2, 2, 7}, {9, 1, 7}, {9, 1, 7},
++			{0, 4, 7}, {0, 4, 7}, {8, 1, 7}, {8, 1, 7},
++			{7, 1, 6}, {7, 1, 6}, {7, 1, 6}, {7, 1, 6},
++			{6, 1, 6}, {6, 1, 6}, {6, 1, 6}, {6, 1, 6},
++			{1, 2, 6}, {1, 2, 6}, {1, 2, 6}, {1, 2, 6},
++			{5, 1, 6}, {5, 1, 6}, {5, 1, 6}, {5, 1, 6},
++			{13, 1, 8}, {0, 6, 8}, {12, 1, 8}, {11, 1, 8},
++			{3, 2, 8}, {1, 3, 8}, {0, 5, 8}, {10, 1, 8},
++			{0, 3, 5}, {0, 3, 5}, {0, 3, 5}, {0, 3, 5},
++			{0, 3, 5}, {0, 3, 5}, {0, 3, 5}, {0, 3, 5},
++			{4, 1, 5}, {4, 1, 5}, {4, 1, 5}, {4, 1, 5},
++			{4, 1, 5}, {4, 1, 5}, {4, 1, 5}, {4, 1, 5},
++			{3, 1, 5}, {3, 1, 5}, {3, 1, 5}, {3, 1, 5},
++			{3, 1, 5}, {3, 1, 5}, {3, 1, 5}, {3, 1, 5}},
++
++		/* tab0a[252]: Table B-15, DCT coefficients table one,
++	 * codes 000001xx ... 11111111
++	 */
++		{{65, 0, 6}, {65, 0, 6}, {65, 0, 6}, {65, 0, 6}, /* Escape */
++			{7, 1, 7}, {7, 1, 7}, {8, 1, 7}, {8, 1, 7},
++			{6, 1, 7}, {6, 1, 7}, {2, 2, 7}, {2, 2, 7},
++			{0, 7, 6}, {0, 7, 6}, {0, 7, 6}, {0, 7, 6},
++			{0, 6, 6}, {0, 6, 6}, {0, 6, 6}, {0, 6, 6},
++			{4, 1, 6}, {4, 1, 6}, {4, 1, 6}, {4, 1, 6},
++			{5, 1, 6}, {5, 1, 6}, {5, 1, 6}, {5, 1, 6},
++			{1, 5, 8}, {11, 1, 8}, {0, 11, 8}, {0, 10, 8},
++			{13, 1, 8}, {12, 1, 8}, {3, 2, 8}, {1, 4, 8},
++			{2, 1, 5}, {2, 1, 5}, {2, 1, 5}, {2, 1, 5},
++			{2, 1, 5}, {2, 1, 5}, {2, 1, 5}, {2, 1, 5},
++			{1, 2, 5}, {1, 2, 5}, {1, 2, 5}, {1, 2, 5},
++			{1, 2, 5}, {1, 2, 5}, {1, 2, 5}, {1, 2, 5},
++			{3, 1, 5}, {3, 1, 5}, {3, 1, 5}, {3, 1, 5},
++			{3, 1, 5}, {3, 1, 5}, {3, 1, 5}, {3, 1, 5},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{1, 1, 3}, {1, 1, 3}, {1, 1, 3}, {1, 1, 3},
++			{64, 0, 4}, {64, 0, 4}, {64, 0, 4}, {64, 0, 4}, /* EOB */
++			{64, 0, 4}, {64, 0, 4}, {64, 0, 4}, {64, 0, 4},
++			{64, 0, 4}, {64, 0, 4}, {64, 0, 4}, {64, 0, 4},
++			{64, 0, 4}, {64, 0, 4}, {64, 0, 4}, {64, 0, 4},
++			{0, 3, 4}, {0, 3, 4}, {0, 3, 4}, {0, 3, 4},
++			{0, 3, 4}, {0, 3, 4}, {0, 3, 4}, {0, 3, 4},
++			{0, 3, 4}, {0, 3, 4}, {0, 3, 4}, {0, 3, 4},
++			{0, 3, 4}, {0, 3, 4}, {0, 3, 4}, {0, 3, 4},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 1, 2}, {0, 1, 2}, {0, 1, 2}, {0, 1, 2},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 2, 3}, {0, 2, 3}, {0, 2, 3}, {0, 2, 3},
++			{0, 4, 5}, {0, 4, 5}, {0, 4, 5}, {0, 4, 5},
++			{0, 4, 5}, {0, 4, 5}, {0, 4, 5}, {0, 4, 5},
++			{0, 5, 5}, {0, 5, 5}, {0, 5, 5}, {0, 5, 5},
++			{0, 5, 5}, {0, 5, 5}, {0, 5, 5}, {0, 5, 5},
++			{9, 1, 7}, {9, 1, 7}, {1, 3, 7}, {1, 3, 7},
++			{10, 1, 7}, {10, 1, 7}, {0, 8, 7}, {0, 8, 7},
++			{0, 9, 7}, {0, 9, 7}, {0, 12, 8}, {0, 13, 8},
++			{2, 3, 8}, {4, 2, 8}, {0, 14, 8}, {0, 15, 8}},
++
++		/* Table B-14, DCT coefficients table zero,
++	 * codes 0000001000 ... 0000001111
++	 */
++		{{16, 1, 10}, {5, 2, 10}, {0, 7, 10}, {2, 3, 10},
++			{1, 4, 10}, {15, 1, 10}, {14, 1, 10}, {4, 2, 10}},
++
++		/* Table B-15, DCT coefficients table one,
++	 * codes 000000100x ... 000000111x
++	 */
++		{{5, 2, 9}, {5, 2, 9}, {14, 1, 9}, {14, 1, 9},
++			{2, 4, 10}, {16, 1, 10}, {15, 1, 9}, {15, 1, 9}},
++
++		/* Table B-14/15, DCT coefficients table zero / one,
++	 * codes 000000010000 ... 000000011111
++	 */
++		{{0, 11, 12}, {8, 2, 12}, {4, 3, 12}, {0, 10, 12},
++			{2, 4, 12}, {7, 2, 12}, {21, 1, 12}, {20, 1, 12},
++			{0, 9, 12}, {19, 1, 12}, {18, 1, 12}, {1, 5, 12},
++			{3, 3, 12}, {0, 8, 12}, {6, 2, 12}, {17, 1, 12}},
++
++		/* Table B-14/15, DCT coefficients table zero / one,
++	 * codes 0000000010000 ... 0000000011111
++	 */
++		{{10, 2, 13}, {9, 2, 13}, {5, 3, 13}, {3, 4, 13},
++			{2, 5, 13}, {1, 7, 13}, {1, 6, 13}, {0, 15, 13},
++			{0, 14, 13}, {0, 13, 13}, {0, 12, 13}, {26, 1, 13},
++			{25, 1, 13}, {24, 1, 13}, {23, 1, 13}, {22, 1, 13}},
++
++		/* Table B-14/15, DCT coefficients table zero / one,
++	 * codes 00000000010000 ... 00000000011111
++	 */
++		{{0, 31, 14}, {0, 30, 14}, {0, 29, 14}, {0, 28, 14},
++			{0, 27, 14}, {0, 26, 14}, {0, 25, 14}, {0, 24, 14},
++			{0, 23, 14}, {0, 22, 14}, {0, 21, 14}, {0, 20, 14},
++			{0, 19, 14}, {0, 18, 14}, {0, 17, 14}, {0, 16, 14}},
++
++		/* Table B-14/15, DCT coefficients table zero / one,
++	 * codes 000000000010000 ... 000000000011111
++	 */
++		{{0, 40, 15}, {0, 39, 15}, {0, 38, 15}, {0, 37, 15},
++			{0, 36, 15}, {0, 35, 15}, {0, 34, 15}, {0, 33, 15},
++			{0, 32, 15}, {1, 14, 15}, {1, 13, 15}, {1, 12, 15},
++			{1, 11, 15}, {1, 10, 15}, {1, 9, 15}, {1, 8, 15}},
++
++		/* Table B-14/15, DCT coefficients table zero / one,
++	 * codes 0000000000010000 ... 0000000000011111
++	 */
++		{{1, 18, 16}, {1, 17, 16}, {1, 16, 16}, {1, 15, 16},
++			{6, 3, 16}, {16, 2, 16}, {15, 2, 16}, {14, 2, 16},
++			{13, 2, 16}, {12, 2, 16}, {11, 2, 16}, {31, 1, 16},
++			{30, 1, 16}, {29, 1, 16}, {28, 1, 16}, {27, 1, 16}}
++
++};
++
++#undef VLC_ALIGNED16
+\ No newline at end of file
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 37b6a4d..9827691 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2,6 +2,7 @@
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "ps2_log.h"
++#include "ipu/ps2_ipu.h"
+ #include <atomic>
+ #include <cstring>
+ #include <limits>
+@@ -355,6 +356,7 @@ bool PS2Memory::initialize(size_t ramSize)
+ 
+         // Initialize I/O registers
+         m_ioRegisters.clear();
++        m_gifStatRegister = nullptr;
+ 
+         // Initialize GS registers
+         memset(&gs_regs, 0, sizeof(gs_regs));
+@@ -413,9 +415,14 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+ 
+     constexpr uint32_t kGifStat = 0x10003020u;
+     constexpr uint32_t kGifFqcMask = 0x1F000000u;
+-    auto gifStatIt = m_ioRegisters.find(kGifStat);
+-    if (gifStatIt != m_ioRegisters.end())
+-        gifStatIt->second &= ~kGifFqcMask;
++    if (m_gifStatRegister == nullptr)
++    {
++        auto gifStatIt = m_ioRegisters.find(kGifStat);
++        if (gifStatIt != m_ioRegisters.end())
++            m_gifStatRegister = &gifStatIt->second;
++    }
++    if (m_gifStatRegister != nullptr)
++        *m_gifStatRegister &= ~kGifFqcMask;
+ 
+     uint32_t interruptMask = 0u;
+     for (size_t index = 0; index < m_eeTimers.size(); ++index)
+@@ -1070,6 +1077,14 @@ void PS2Memory::write128(uint32_t address, __m128i value)
+     const bool scratch = isScratchpad(address);
+     uint32_t physAddr = translateAddress(address);
+ 
++    if (!scratch && physAddr == 0x10007010u) // IPU_in_FIFO
++    {
++        alignas(16) uint8_t fifoData[16];
++        _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
++        ps2_ipu::pushInput(fifoData, sizeof(fifoData));
++        pumpIpuFromDma();
++        return;
++    }
+     if (!scratch && physAddr == 0x10004000u) // VIF0_FIFO
+     {
+         alignas(16) uint8_t fifoData[16];
+@@ -1179,22 +1194,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+         return true;
+     }
+ 
+-    if (address >= 0x10002000 && address <= 0x10002030)
++    if (address >= 0x10002000 && address <= 0x10002034)
+     {
+-        if (address == 0x10002010)
+-        {
+-            m_ioRegisters[address] = value & ~(1u << 31);
+-            if (value & (1u << 30))
+-            {
+-                m_ioRegisters[0x10002000] = 0;
+-                m_ioRegisters[0x10002020] = 0;
+-                m_ioRegisters[0x10002030] = 0;
+-            }
+-        }
+-        else
+-        {
+-            m_ioRegisters[address] = value;
+-        }
++        // IPU registers (functional MPEG2 decoder in ipu/ps2_ipu.cpp).
++        ps2_ipu::write32(address - 0x10002000u, value);
++        pumpIpuFromDma();
+         return true;
+     }
+ 
+@@ -1310,6 +1314,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+             {
+                 return true;
+             }
++            if (tryProcessIpuDma(channelBase, value))
++            {
++                return true;
++            }
+ 
+             if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) && (m_gsVRAM || channelBase == 0x10008000u))
+             {
+@@ -1337,6 +1345,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                 {
+                     enqueueTransfer(madr, qwc);
+                 }
++                else if (mode == 1 && channelBase == 0x10009000u && ((m_ioRegisters[0x1000E000u] >> 2) & 0x3u) == 2u)
++                {
++                    // VIF1 en modo MFIFO: consume del anillo lo que el canal SPR vaya produciendo
++                    m_ioRegisters[channelBase] = chcr | 0x100u;
++                    drainMfifoVif1();
++                }
+                 else if (mode == 1)
+                 {
+                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
+@@ -1614,6 +1628,32 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+         return false;
+ 
+     const bool fromScratchpad = channelBase == kSprFromChannel;
++    // SPR->memoria en modo MFIFO: MADR da la vuelta dentro del anillo (RBOR/RBSR) durante la propia transferencia. Copiar de forma
++    // lineal escribia mas alla del final del anillo (en Vampire Night, sobre 0x140000, el inicio del codigo del ELF) y dejaba
++    // sin datos el comienzo del anillo que consume VIF1.
++    if (fromScratchpad && (((m_ioRegisters[0x1000E000u] >> 2) & 0x3u) != 0u))
++    {
++        const uint32_t rbsr = m_ioRegisters[0x1000E040u];
++        const uint32_t rbor = m_ioRegisters[0x1000E050u];
++        uint32_t madr = originalMadr;
++        uint32_t sadr = originalSadr;
++        for (uint32_t i = 0; i < qwc; ++i)
++        {
++            const uint32_t dst = translateAddress(((rbor & ~rbsr) | (madr & rbsr)) & 0x7FFFFFF0u);
++            if (dst + 16u > PS2_RAM_SIZE)
++                return false;
++            std::memcpy(m_rdram + dst, m_scratchpad + sadr, 16u);
++            markModified(dst, 16u);
++            madr = ((rbor & ~rbsr) | ((madr + 16u) & rbsr)) & 0x7FFFFFF0u;
++            sadr = (sadr + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
++        }
++        m_ioRegisters[channelBase + 0x10u] = madr;
++        m_ioRegisters[channelBase + 0x20u] = 0u;
++        m_ioRegisters[channelBase + 0x80u] = sadr & 0x3FF0u;
++        completeDmacChannel(channelBase, 8u);
++        drainMfifoVif1();
++        return true;
++    }
+     uint32_t scratchOffset = originalSadr;
+     uint32_t bytesLeft = byteCount;
+     uint32_t copied = 0u;
+@@ -1636,13 +1676,121 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+         scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
+     }
+ 
+-    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
++    uint32_t newMadr = (originalMadr + byteCount) & 0x7FFFFFF0u;
++    const bool mfifoOut = fromScratchpad && (((m_ioRegisters[0x1000E000u] >> 2) & 0x3u) != 0u);
++    if (mfifoOut)
++    {
++        const uint32_t rbsr = m_ioRegisters[0x1000E040u];
++        const uint32_t rbor = m_ioRegisters[0x1000E050u];
++        newMadr = ((rbor & ~rbsr) | (newMadr & rbsr)) & 0x7FFFFFF0u;
++    }
++    m_ioRegisters[channelBase + 0x10u] = newMadr;
+     m_ioRegisters[channelBase + 0x20u] = 0u;
+     m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
+     completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
++    if (mfifoOut)
++        drainMfifoVif1();
+     return true;
+ }
+ 
++// MFIFO (D_CTRL.MFD = 2): VIF1 lee cadenas DMA del anillo [RBOR, RBOR+RBSR] hasta alcanzar el MADR del canal SPR.
++void PS2Memory::drainMfifoVif1()
++{
++    static constexpr uint32_t kVif1 = 0x10009000u;
++    static constexpr uint32_t kSprFrom = 0x1000D000u;
++    if (((m_ioRegisters[0x1000E000u] >> 2) & 0x3u) != 2u)
++        return;
++    const uint32_t chcr = m_ioRegisters[kVif1];
++    if ((chcr & 0x100u) == 0u || ((chcr >> 2) & 0x3u) != 1u)
++        return;
++
++    const uint32_t rbsr = m_ioRegisters[0x1000E040u];
++    const uint32_t rbor = m_ioRegisters[0x1000E050u];
++    auto wrap = [&](uint32_t a) { return ((rbor & ~rbsr) | (a & rbsr)) & 0x7FFFFFF0u; };
++    auto phys = [&](uint32_t a, uint32_t n) -> const uint8_t * {
++        try
++        {
++            const uint32_t o = translateAddress(a);
++            if (o + n > PS2_RAM_SIZE)
++                return nullptr;
++            return m_rdram + o;
++        }
++        catch (const std::exception &)
++        {
++            return nullptr;
++        }
++    };
++
++    uint32_t tadr = wrap(m_ioRegisters[kVif1 + 0x30u]);
++    const uint32_t madr = wrap(m_ioRegisters[kSprFrom + 0x10u]);
++    std::vector<uint8_t> buf;
++    bool ended = false;
++    int guard = 0;
++    while (tadr != madr && guard++ < 4096)
++    {
++        const uint8_t *tp = phys(tadr, 16);
++        if (!tp)
++            break;
++        uint64_t tag = 0;
++        std::memcpy(&tag, tp, 8);
++        const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
++        const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
++        const uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFFu);
++        const bool inRing = (id == 0u || id == 1u || id == 7u);
++        if (inRing)
++        {
++            // el tag y su carga deben estar completos en el anillo
++            const uint32_t avail = (madr - tadr) & rbsr;
++            if (avail < 16u + qwc * 16u)
++                break;
++        }
++        if ((chcr & 0x40u) != 0u)
++            buf.insert(buf.end(), tp + 8, tp + 16);
++        uint32_t next = wrap(tadr + 16u);
++        if (qwc != 0u)
++        {
++            uint32_t src = inRing ? wrap(tadr + 16u) : addr;
++            uint32_t left = qwc * 16u;
++            while (left != 0u)
++            {
++                uint32_t chunk = left;
++                if (inRing)
++                {
++                    const uint32_t ringEnd = (rbor & ~rbsr) + rbsr + 16u;
++                    chunk = std::min(chunk, ringEnd - src);
++                }
++                const uint8_t *dp = phys(src, chunk);
++                if (!dp)
++                    break;
++                buf.insert(buf.end(), dp, dp + chunk);
++                src = inRing ? wrap(src + chunk) : (src + chunk);
++                left -= chunk;
++            }
++            if (inRing)
++                next = wrap(tadr + 16u + qwc * 16u);
++        }
++        tadr = next;
++        if (id == 0u || id == 7u) // refe / end: la cadena de VIF1 acaba aqui
++        {
++            ended = true;
++            break;
++        }
++    }
++    m_ioRegisters[kVif1 + 0x30u] = tadr;
++    if (!buf.empty())
++    {
++        PendingTransfer pt;
++        pt.fromScratchpad = false;
++        pt.srcAddr = 0;
++        pt.qwc = 0;
++        pt.chainData = std::move(buf);
++        m_pendingVif1Transfers.push_back(std::move(pt));
++        processPendingTransfers();
++    }
++    if (ended)
++        completeDmacChannel(kVif1, 1u);
++}
++
+ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
+ {
+     static constexpr uint32_t kDStat = 0x1000E010u;
+@@ -1896,7 +2044,11 @@ void PS2Memory::processPendingTransfers()
+         m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
+         m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
+     }
+-    if (hadVif1)
++    // En MFIFO (D_CTRL.MFD == 2) VIF1 sigue activo leyendo el anillo hasta su tag END: no se da por terminado
++    // en cada pasada. Si se limpia STR aqui el juego reinicia el anillo y pierde lo pendiente (p. ej. el MPG de VU1).
++    const bool vif1Mfifo = ((m_ioRegisters[0x1000E000u] >> 2) & 0x3u) == 2u && (m_ioRegisters[VIF1_CHANNEL + 0x00] & 0x100u) != 0u &&
++                           ((m_ioRegisters[VIF1_CHANNEL + 0x00] >> 2) & 0x3u) == 1u;
++    if (hadVif1 && !vif1Mfifo)
+     {
+         raiseDStatChannel(1u); // VIF1 channel
+         queueCompletedDmacCause(1u);
+@@ -2317,26 +2469,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+         return 0u;
+     }
+ 
+-    if (address >= 0x10002000 && address <= 0x10002030)
++    if (address >= 0x10002000 && address <= 0x10002034)
+     {
+-        uint32_t val = 0;
+-        switch (address)
+-        {
+-        case 0x10002000:
+-            val = m_ioRegisters[address];
+-            break;
+-        case 0x10002010:
+-            val = m_ioRegisters[address] & ~(1u << 31);
+-            break;
+-        case 0x10002020:
+-        case 0x10002030:
+-            val = m_ioRegisters[address];
+-            break;
+-        default:
+-            val = 0;
+-            break;
+-        }
+-        return val;
++        return ps2_ipu::read32(address - 0x10002000u);
+     }
+ 
+     if (address == 0x10003020u) // GIF_STAT
+@@ -2542,3 +2677,128 @@ void PS2Memory::clearModifiedFlag(uint32_t address, uint32_t size)
+         }
+     }
+ }
++
++
++// ---- IPU DMA (toIPU = channel 4, fromIPU = channel 3) ----
++bool PS2Memory::tryProcessIpuDma(uint32_t channelBase, uint32_t chcr)
++{
++    constexpr uint32_t kFromIpu = 0x1000B000u;
++    constexpr uint32_t kToIpu = 0x1000B400u;
++    if (channelBase != kFromIpu && channelBase != kToIpu)
++        return false;
++
++    m_ioRegisters[channelBase] = chcr | 0x100u;
++    if (channelBase == kFromIpu)
++    {
++        m_ipuFromPending = true;
++        pumpIpuFromDma();
++        return true;
++    }
++
++    auto feed = [&](uint32_t src, uint32_t qwc)
++    {
++        for (uint32_t i = 0; i < qwc; ++i, src += 16u)
++        {
++            const bool scratch = isScratchpad(src);
++            const uint32_t phys = translateAddress(src);
++            const uint8_t *base = scratch ? m_scratchpad : m_rdram;
++            const uint32_t lim = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
++            if (phys + 16u > lim)
++                break;
++            ps2_ipu::pushInput(base + phys, 16);
++        }
++    };
++
++    const uint32_t mode = (chcr >> 2) & 3u;
++    if (mode == 0u)
++    {
++        const uint32_t madr = m_ioRegisters[kToIpu + 0x10u];
++        const uint32_t qwc = m_ioRegisters[kToIpu + 0x20u] & 0xFFFFu;
++        feed(madr, qwc);
++        m_ioRegisters[kToIpu + 0x10u] = madr + qwc * 16u;
++        m_ioRegisters[kToIpu + 0x20u] = 0u;
++    }
++    else
++    {
++        uint32_t tadr = m_ioRegisters[kToIpu + 0x30u];
++        uint32_t lastChcr = chcr;
++        for (int tags = 0; tags < 65536; ++tags)
++        {
++            const bool tsc = isScratchpad(tadr);
++            const uint32_t tp = translateAddress(tadr);
++            const uint8_t *tb = tsc ? m_scratchpad : m_rdram;
++            const uint32_t tl = tsc ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
++            if (tp + 16u > tl)
++                break;
++            uint64_t tag;
++            std::memcpy(&tag, tb + tp, 8);
++            const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
++            const uint32_t id = static_cast<uint32_t>((tag >> 28) & 7u);
++            const bool irq = ((tag >> 31) & 1u) != 0u;
++            const uint32_t addr = static_cast<uint32_t>(tag >> 32);
++            lastChcr = (chcr & 0xFFFFu) | (static_cast<uint32_t>(tag) & 0xFFFF0000u);
++            bool end = false;
++            uint32_t src = addr;
++            switch (id)
++            {
++            case 0: tadr += 16u; end = true; break;                  // REFE
++            case 1: src = tadr + 16u; tadr = src + qwc * 16u; break; // CNT
++            case 2: src = tadr + 16u; tadr = addr; break;            // NEXT
++            case 3: case 4: tadr += 16u; break;                      // REF / REFS
++            case 7: src = tadr + 16u; end = true; break;             // END
++            default: end = true; break;
++            }
++            feed(src, qwc);
++            m_ioRegisters[kToIpu + 0x10u] = src + qwc * 16u;
++            if (end || (irq && (chcr & 0x80u)))
++                break;
++        }
++        m_ioRegisters[kToIpu + 0x30u] = tadr;
++        m_ioRegisters[kToIpu + 0x20u] = 0u;
++        m_ioRegisters[kToIpu] = lastChcr | 0x100u;
++    }
++    completeDmacChannel(kToIpu, 4u);
++    pumpIpuFromDma();
++    return true;
++}
++
++void PS2Memory::pumpIpuFromDma()
++{
++    constexpr uint32_t kFromIpu = 0x1000B000u;
++    if (!m_ipuFromPending)
++        return;
++    uint32_t qwc = m_ioRegisters[kFromIpu + 0x20u] & 0xFFFFu;
++    uint32_t madr = m_ioRegisters[kFromIpu + 0x10u];
++    while (qwc > 0)
++    {
++        const size_t availQw = ps2_ipu::outputBytes() / 16u;
++        if (availQw == 0)
++            break;
++        const uint32_t n = static_cast<uint32_t>(std::min<size_t>(availQw, qwc));
++        const bool scratch = isScratchpad(madr);
++        const uint32_t phys = translateAddress(madr);
++        uint8_t *base = scratch ? m_scratchpad : m_rdram;
++        const uint32_t lim = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
++        uint32_t nn = n;
++        if (phys + nn * 16u > lim)
++            nn = (lim > phys) ? (lim - phys) / 16u : 0u;
++        if (nn == 0)
++        {
++            uint8_t sink[16];
++            ps2_ipu::popOutput(sink, 16);
++            qwc--;
++            madr += 16u;
++            continue;
++        }
++        ps2_ipu::popOutput(base + phys, static_cast<size_t>(nn) * 16u);
++        qwc -= nn;
++        madr += nn * 16u;
++    }
++    m_ioRegisters[kFromIpu + 0x20u] = qwc;
++    m_ioRegisters[kFromIpu + 0x10u] = madr;
++    if (qwc == 0)
++    {
++        m_ipuFromPending = false;
++        completeDmacChannel(kFromIpu, 3u);
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 8590f14..2213df1 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,6 +1,11 @@
+ #include "runtime/ps2_pad.h"
+ #include "ps2_host_backend.h"
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
++#include <string>
++#include <vector>
+ 
+ namespace
+ {
+@@ -25,7 +30,51 @@ namespace
+     constexpr uint16_t PAD_L2 = 0x0100u;
+ }
+ 
+-bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
++namespace
++{
++    // Depuracion: STAKE_AUTOPRESS="seg:boton,seg:boton" (botones: start, select, cross, circle, square, triangle, up, down,
++    // left, right) mantiene pulsado el boton 0,4 s a partir de esos segundos desde la primera lectura del pad.
++    struct AutoPress { double at; uint16_t mask; };
++    uint16_t autoPressMask()
++    {
++        static const std::vector<AutoPress> presses = []
++        {
++            std::vector<AutoPress> v;
++            const char *env = std::getenv("STAKE_AUTOPRESS");
++            if (!env) return v;
++            std::string s(env);
++            size_t pos = 0;
++            while (pos < s.size())
++            {
++                size_t end = s.find(',', pos);
++                if (end == std::string::npos) end = s.size();
++                const std::string item = s.substr(pos, end - pos);
++                pos = end + 1;
++                const size_t c = item.find(':');
++                if (c == std::string::npos) continue;
++                const double t = std::atof(item.substr(0, c).c_str());
++                const std::string b = item.substr(c + 1);
++                uint16_t m = 0;
++                if (b == "start") m = PAD_START; else if (b == "select") m = PAD_SELECT;
++                else if (b == "cross") m = PAD_CROSS; else if (b == "circle") m = PAD_CIRCLE;
++                else if (b == "square") m = PAD_SQUARE; else if (b == "triangle") m = PAD_TRIANGLE;
++                else if (b == "up") m = PAD_UP; else if (b == "down") m = PAD_DOWN;
++                else if (b == "left") m = PAD_LEFT; else if (b == "right") m = PAD_RIGHT;
++                if (m) v.push_back({t, m});
++            }
++            return v;
++        }();
++        if (presses.empty()) return 0;
++        static const auto t0 = std::chrono::steady_clock::now();
++        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++        uint16_t m = 0;
++        for (const auto &p : presses)
++            if (now >= p.at && now < p.at + 0.4) m |= p.mask;
++        return m;
++    }
++}
++
++bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+ {
+     if (!data || size < 32)
+         return false;
+@@ -119,6 +168,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+             clearBit(PAD_SELECT);
+     }
+ 
++    btns = static_cast<uint16_t>(btns & ~autoPressMask());
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+     return true;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 45cb9d2..b52a832 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -607,7 +607,16 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
+ 
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+ {
+-    m_iopSubsystem->runEeCycles(eeCycles);
++    // El IOP se adelanta por lotes: llamarlo en cada checkpoint del EE (decenas de ciclos) hacia que la preparacion del
++    // planificador del IOP dominara el tiempo y el juego corriera a ~0.3x. 4096 ciclos EE ~ 14 us de PS2.
++    static constexpr uint64_t kIopBatchEeCycles = 4096u;
++    static uint64_t pending = 0u;
++    pending += eeCycles;
++    if (pending < kIopBatchEeCycles)
++        return;
++    const uint64_t run = pending;
++    pending = 0u;
++    m_iopSubsystem->runEeCycles(run);
+ }
+ 
+ void PS2Runtime::resetIop()
+@@ -1088,6 +1097,49 @@ namespace
+     }
+ }
+ 
++
++// --- Overlays de Vampire Night: tablas de funciones por modulo (ver docs/OVERLAYS.md del repo project-stake-recomp) ---
++struct OverlayTable { int idx; const char *name; uint32_t base, end; PS2Runtime::RecompiledFunction *table; };
++#if defined(__GNUC__)
++extern const OverlayTable g_overlayTables[] __attribute__((weak));
++extern const int g_overlayTableCount __attribute__((weak));
++#else
++extern const OverlayTable g_overlayTables[];
++extern const int g_overlayTableCount;
++#endif
++
++namespace
++{
++    // Ventana de overlay a la que pertenece una direccion y modulo cargado ahora en ella (idx en la cabecera MWo3, +4).
++    PS2Runtime::RecompiledFunction overlayLookup(const uint8_t *rdram, uint32_t address)
++    {
++        static const uint32_t kWindows[] = {0x92B000u, 0x9C4800u, 0x9DF000u, 0xA0F800u};
++        if (rdram == nullptr || g_overlayTables == nullptr || (address & 3u) != 0u || address < kWindows[0])
++        {
++            return nullptr;
++        }
++        uint32_t win = 0u;
++        for (uint32_t w : kWindows)
++        {
++            if (address >= w)
++            {
++                win = w;
++            }
++        }
++        uint32_t idx = 0u;
++        std::memcpy(&idx, rdram + win + 4u, sizeof(idx));
++        for (int i = 0; i < g_overlayTableCount; ++i)
++        {
++            const OverlayTable &t = g_overlayTables[i];
++            if (t.idx == static_cast<int>(idx) && address >= t.base && address < t.end)
++            {
++                return t.table[(address - t.base) >> 2];
++            }
++        }
++        return nullptr;
++    }
++}
++
+ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
+ {
+     uint32_t slot = 0u;
+@@ -1112,7 +1164,11 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+ bool PS2Runtime::hasFunction(uint32_t address) const
+ {
+     uint32_t slot = 0u;
+-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
++    if (generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr)
++    {
++        return true;
++    }
++    return overlayLookup(const_cast<PS2Runtime *>(this)->m_memory.getRDRAM(), address) != nullptr;
+ }
+ 
+ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
+@@ -1147,6 +1203,10 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
+             return fn;
+         }
+     }
++    if (RecompiledFunction ov = overlayLookup(m_memory.getRDRAM(), address))
++    {
++        return ov;
++    }
+ 
+     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+               << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index f872edd..d186b5a 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -304,33 +304,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+ 
+     while (pos + 4 <= sizeBytes)
+     {
+-        if (m_vif1PendingPath2ImageQwc != 0u)
+-        {
+-            const uint32_t availableQw = (sizeBytes - pos) / 16u;
+-            if (availableQw == 0u)
+-            {
+-                break;
+-            }
+-
+-            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
+-            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
+-            const uint64_t imageTag =
+-                static_cast<uint64_t>(chunkQw & 0x7FFFu) |
+-                ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
+-                (static_cast<uint64_t>(kGifFmtImage) << 58);
+-            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+-            std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
+-            submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, m_vif1PendingPath2DirectHl);
+-
+-            pos += chunkQw * 16u;
+-            m_vif1PendingPath2ImageQwc -= chunkQw;
+-            if (m_vif1PendingPath2ImageQwc == 0u)
+-            {
+-                m_vif1PendingPath2DirectHl = false;
+-            }
+-            continue;
+-        }
+-
+         uint32_t cmd;
+         memcpy(&cmd, data + pos, 4);
+         pos += 4;
+@@ -498,13 +471,35 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             if (qwCount > 0)
+             {
+                 const bool directHl = (opcode == VIF_DIRECTHL);
+-                submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
+-
+-                const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
+-                if (pendingImageQw != 0u)
++                uint32_t off = 0u; // qwords ya consumidos de este DIRECT
++                // Los datos de una imagen GIF que no cupieron en el DIRECT anterior continuan en este (el codigo VIF va antes, no se mezcla con ellos).
++                if (m_vif1PendingPath2ImageQwc != 0u)
++                {
++                    const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, qwCount);
++                    std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
++                    const uint64_t imageTag =
++                        static_cast<uint64_t>(chunkQw & 0x7FFFu) |
++                        ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
++                        (static_cast<uint64_t>(kGifFmtImage) << 58);
++                    std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
++                    std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
++                    submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, m_vif1PendingPath2DirectHl);
++                    m_vif1PendingPath2ImageQwc -= chunkQw;
++                    if (m_vif1PendingPath2ImageQwc == 0u)
++                        m_vif1PendingPath2DirectHl = false;
++                    off = chunkQw;
++                }
++                if (off < qwCount)
+                 {
+-                    m_vif1PendingPath2ImageQwc = pendingImageQw;
+-                    m_vif1PendingPath2DirectHl = directHl;
++                    const uint32_t restQw = qwCount - off;
++                    submitGifPacket(GifPathId::Path2, data + pos + off * 16u, restQw * 16, true, directHl);
++
++                    const uint32_t pendingImageQw = pendingGifImageQwc(data + pos + off * 16u, restQw * 16u);
++                    if (pendingImageQw != 0u)
++                    {
++                        m_vif1PendingPath2ImageQwc = pendingImageQw;
++                        m_vif1PendingPath2DirectHl = directHl;
++                    }
+                 }
+             }
+ 

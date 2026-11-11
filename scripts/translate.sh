@@ -14,6 +14,11 @@ B=build/ps2recomp
 }
 mkdir -p work; cp "$ELF" work/game.elf
 $B/ps2xAnalyzer/ps2_analyzer work/game.elf work/game.toml
+# El analizador marca como "codigo automodificable" todo `sw` seguido de j/jal cuyo destino cae dentro del
+# segmento cargable, y lo sustituye por nop. En este ELF el segmento incluye .data, asi que los 51 casos son
+# escrituras normales a globales de sceMpeg/sceCd/MPS/ADX (p.ej. 0x182520 guarda el puntero de trabajo de MPS,
+# sin el cual MPS_Create devuelve 0 y Sofdec no arranca). El juego no se automodifica: se quitan esos parches.
+sed -i.bak '/# Potential self-modifying code/d' work/game.toml && rm -f work/game.toml.bak
 $B/ps2xRecomp/ps2_recomp work/game.toml > work/run.log 2>&1 || true
 echo "primera pasada, errores: $(grep -c '\[error\]' work/run.log)"
 # segunda pasada: las funciones con error son datos tomados por codigo; se saltan
