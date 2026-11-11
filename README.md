@@ -44,3 +44,8 @@ Con el parche el juego avanza y sube frames. Pendiente: ver que dibuja (GS/VU1),
 - `runner/stake_overrides.cpp` (mecanismo `PS2_REGISTER_GAME_OVERRIDE`, como en otros proyectos de PS2Recomp): `ADXM_WaitVsync` (0x16D690) se sustituye por una espera de 16 ms porque el runtime no entrega aun la interrupcion de vsync al hilo de ADX.
   Con eso el juego sale de la pelicula de arranque y corre su bucle principal (`ps2_main`, `Synch__Fv` una vez por fotograma), pero la ventana sigue negra.
 - Diagnostico de la pantalla negra: `gif` se queda en 130 mientras `dma` sube; en el flujo VIF1 aparecen `MSCAL` con pc imposibles (>0x4000) y ningun `MPG`. Hipotesis: los microprogramas de VU1 no se cargan, o el flujo VIF1 (UNPACK/tags con TTE) se desalinea. Siguiente: volcar el flujo VIF1 de un fotograma y compararlo con PCSX2.
+
+## Licencia
+
+Este repositorio se distribuye bajo **GPL-3.0** (ver `LICENSE`). Los parches incluyen codigo derivado de PS2Recomp y de la IPU de
+PCSX2/fixer-ipu (ambos GPL-3.0). No contiene el juego, la ISO, la BIOS ni assets: hace falta una copia propia del disco.
