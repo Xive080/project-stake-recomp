@@ -585,6 +585,51 @@ index 8c1c7c5..5f06935 100644
          if (m_stubFunctionStarts.contains(function.start))
          {
              return true;
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 509fd07..70bb8be 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -783,7 +783,10 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VSQI(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VSQI.dest fs, (it++): the stored VF is fs (bits 11-15, rd) and the VI
++        // base is it (bits 16-20, rt), the reverse of VLQI ft, (is++).
++        uint8_t vis = inst.rt;
++        uint8_t vfs = inst.rd;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+         return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+                            "__m128i old_val = READ128(addr); "
+@@ -791,7 +794,7 @@ namespace ps2recomp
+                            "WRITE128(addr, _mm_castps_si128(res)); "
+                            "ctx->vi[{}] = (ctx->vi[{}] + 1) & 0x3FF; }}",
+                            vis,
+-                           inst.rt,
++                           vfs,
+                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+                            vis, vis);
+@@ -815,7 +818,9 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VSQD(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VSQD.dest fs, (--it): same field layout as VSQI.
++        uint8_t vis = inst.rt;
++        uint8_t vfs = inst.rd;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+         return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
+                            "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+@@ -824,7 +829,7 @@ namespace ps2recomp
+                            "WRITE128(addr, _mm_castps_si128(res)); }}",
+                            vis, vis,
+                            vis,
+-                           inst.rt,
++                           vfs,
+                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0);
+     }
 diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
 index 589d768..8fff17d 100644
 --- a/ps2xRuntime/CMakeLists.txt
@@ -1605,15 +1650,16 @@ index f0ad507..eafcbee 100644
      result.sourceFbp = selected.fbp;
      return result;
 diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
-index 9281d5f..e3b2630 100644
+index 9281d5f..144b432 100644
 --- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
-@@ -2,13 +2,16 @@
+@@ -2,13 +2,17 @@
  #include "runtime/gs/gs_cpu_backend.h"
  #include "ps2_log.h"
  #include "runtime/ps2_memory.h"
 +#include "gs_gif_path_context.h"
  #include <atomic>
++#include <chrono>
  #include <algorithm>
  #include <cmath>
  #include <cstdio>
@@ -1625,7 +1671,7 @@ index 9281d5f..e3b2630 100644
  
  namespace
  {
-@@ -102,8 +105,38 @@ namespace
+@@ -102,8 +106,38 @@ namespace
      std::atomic<uint32_t> s_debugTexaWriteCount{0};
      std::atomic<uint32_t> s_debugCvFontUploadCount{0};
      std::atomic<uint32_t> s_debugLocalCopyCount{0};
@@ -1664,7 +1710,7 @@ index 9281d5f..e3b2630 100644
  
  GS::GS()
      : m_backend(std::make_unique<GSCpuBackend>())
-@@ -125,6 +158,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
+@@ -125,6 +159,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
  void GS::reset()
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -1672,7 +1718,7 @@ index 9281d5f..e3b2630 100644
      std::memset(m_ctx, 0, sizeof(m_ctx));
      m_prim = {};
      m_primRegister = {};
-@@ -644,7 +678,12 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+@@ -644,7 +679,12 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
      if (!data || sizeBytes < 16 || !m_backend)
          return;
  
@@ -1686,7 +1732,7 @@ index 9281d5f..e3b2630 100644
          return;
  
      PS2_IF_AGRESSIVE_LOGS({
-@@ -669,72 +708,100 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+@@ -669,72 +709,100 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
      });
  
      uint32_t offset = 0;
@@ -1728,21 +1774,21 @@ index 9281d5f..e3b2630 100644
 -        }
 +            if (((tagLo >> 46) & 1) != 0)
 +                writeRegisterUnlocked(GS_REG_PRIM, (tagLo >> 47) & 0x7FF);
++
++            for (uint32_t i = 0; i < cur.nreg; ++i)
++                cur.regs[i] = static_cast<uint8_t>((tagHi >> (i * 4)) & 0xF);
  
 -        uint8_t regs[16];
 -        for (uint32_t i = 0; i < nreg; ++i)
 -            regs[i] = static_cast<uint8_t>((tagHi >> (i * 4)) & 0xF);
-+            for (uint32_t i = 0; i < cur.nreg; ++i)
-+                cur.regs[i] = static_cast<uint8_t>((tagHi >> (i * 4)) & 0xF);
- 
--        if (flg == GIF_FMT_PACKED)
 +            // PACKED/REGLIST: NLOOP*NREG datos; IMAGE (y FLG=3, que el GS trata igual): NLOOP qwords.
 +            cur.remaining = (cur.flg == GIF_FMT_PACKED || cur.flg == GIF_FMT_REGLIST) ? nloop * cur.nreg : nloop;
 +            cur.regIndex = 0;
 +            cur.active = cur.remaining != 0u;
 +            continue;
 +        }
-+
+ 
+-        if (flg == GIF_FMT_PACKED)
 +        bool suspended = false;
 +        if (cur.flg == GIF_FMT_PACKED)
          {
@@ -1811,7 +1857,7 @@ index 9281d5f..e3b2630 100644
 +            offset += chunkQw * 16u;
 +            cur.remaining -= chunkQw;
 +            suspended = cur.remaining != 0u;
-         }
++        }
 +
 +        if (suspended)
 +        {
@@ -1821,7 +1867,7 @@ index 9281d5f..e3b2630 100644
 +            if (cur.flg == GIF_FMT_PACKED || cur.flg == GIF_FMT_REGLIST)
 +                cur.active = false;
 +            break;
-+        }
+         }
 +        cur.active = false;
      }
 +
@@ -1830,6 +1876,48 @@ index 9281d5f..e3b2630 100644
  }
  
  bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+@@ -1576,6 +1644,41 @@ void GS::vertexKick(bool drawing)
+     if (drawing && m_backend)
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
++        {   // DIAG temporal: VN_GSSTAT=1, primitivas por PATH cada ~2 s
++            static const bool diag = std::getenv("VN_GSSTAT") != nullptr;
++            if (diag)
++            {
++                static unsigned long cnt[4][8] = {};
++                static auto t0 = std::chrono::steady_clock::now();
++                static GSPrimitiveBatch sample[4];
++                static bool has[4] = {};
++                const int p = gs_gif_path::current() & 3;
++                ++cnt[p][static_cast<int>(m_prim.type) & 7];
++                if (!has[p] || (cnt[p][static_cast<int>(m_prim.type) & 7] % 997u) == 0u) { sample[p] = batch; has[p] = true; }
++                const auto now = std::chrono::steady_clock::now();
++                if (now - t0 > std::chrono::seconds(2))
++                {
++                    t0 = now;
++                    for (int q = 0; q < 4; ++q)
++                    {
++                        unsigned long tot = 0;
++                        for (int k = 0; k < 8; ++k) tot += cnt[q][k];
++                        if (!tot) continue;
++                        const GSPrimitiveBatch &s = sample[q];
++                        std::fprintf(stderr, "[GSSTAT] path%d tri=%lu strip=%lu fan=%lu spr=%lu pt=%lu ln=%lu | fbp=%x fbw=%u psm=%x fbmsk=%x zbp=%x zpsm=%x zmsk=%d test=%llx alpha=%llx sc=%u-%u,%u-%u ofs=%u,%u v0=(%.1f,%.1f,%.0f rgba=%u,%u,%u,%u) tme=%d abe=%d ctxt=%d\n",
++                                     q, cnt[q][3], cnt[q][4], cnt[q][5], cnt[q][6], cnt[q][0], cnt[q][1] + cnt[q][2],
++                                     s.state.context.frame.fbp, s.state.context.frame.fbw, s.state.context.frame.psm, s.state.context.frame.fbmsk,
++                                     s.state.context.zbuf.zbp, s.state.context.zbuf.psm, (int)s.state.context.zbuf.zmask,
++                                     (unsigned long long)s.state.context.test, (unsigned long long)s.state.context.alpha,
++                                     s.state.context.scissor.x0, s.state.context.scissor.x1, s.state.context.scissor.y0, s.state.context.scissor.y1,
++                                     s.state.context.xyoffset.ofx, s.state.context.xyoffset.ofy,
++                                     s.vertices[0].x, s.vertices[0].y, s.vertices[0].z, s.vertices[0].r, s.vertices[0].g, s.vertices[0].b, s.vertices[0].a,
++                                     (int)s.state.prim.tme, (int)s.state.prim.abe, (int)s.state.prim.ctxt);
++                        for (int k = 0; k < 8; ++k) cnt[q][k] = 0;
++                    }
++                }
++            }
++        }
+         updatePreferredDisplaySourceForDraw(batch);
+         m_backend->Submit(batch);
+         recordDrawDebugEventUnlocked(needed);
 diff --git a/ps2xRuntime/src/lib/gs/gs_gif_path_context.h b/ps2xRuntime/src/lib/gs/gs_gif_path_context.h
 new file mode 100644
 index 0000000..840e127
@@ -3402,7 +3490,7 @@ index 0000000..d458d08
 +#undef VLC_ALIGNED16
 \ No newline at end of file
 diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
-index 37b6a4d..9827691 100644
+index 37b6a4d..960a2b6 100644
 --- a/ps2xRuntime/src/lib/ps2_memory.cpp
 +++ b/ps2xRuntime/src/lib/ps2_memory.cpp
 @@ -2,6 +2,7 @@
@@ -3538,7 +3626,7 @@ index 37b6a4d..9827691 100644
      uint32_t scratchOffset = originalSadr;
      uint32_t bytesLeft = byteCount;
      uint32_t copied = 0u;
-@@ -1636,13 +1676,121 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+@@ -1636,13 +1676,170 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
          scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
      }
  
@@ -3569,7 +3657,14 @@ index 37b6a4d..9827691 100644
 +        return;
 +    const uint32_t chcr = m_ioRegisters[kVif1];
 +    if ((chcr & 0x100u) == 0u || ((chcr >> 2) & 0x3u) != 1u)
++    {
++        static const bool diag = std::getenv("VN_MFIFOTRACE") != nullptr;
++        static unsigned long nOff = 0;
++        if (diag && (++nOff <= 20 || (nOff % 5000) == 0))
++            std::fprintf(stderr, "[MFIFO] vif1-off#%lu chcr=%08x tadr=%08x sprmadr=%08x\n", nOff, chcr,
++                         m_ioRegisters[kVif1 + 0x30u], m_ioRegisters[kSprFrom + 0x10u]);
 +        return;
++    }
 +
 +    const uint32_t rbsr = m_ioRegisters[0x1000E040u];
 +    const uint32_t rbor = m_ioRegisters[0x1000E050u];
@@ -3636,11 +3731,53 @@ index 37b6a4d..9827691 100644
 +            if (inRing)
 +                next = wrap(tadr + 16u + qwc * 16u);
 +        }
++        {
++            static const bool diag = std::getenv("VN_MFIFOTRACE") != nullptr;
++            static unsigned long nId[8] = {};
++            ++nId[id];
++            struct H { uint32_t tadr, madr, chcr; uint64_t tag; unsigned long call; };
++            static H hist[64]; static unsigned hpos = 0; static unsigned long call = 0, nAnom = 0;
++            static uint32_t lastMadr = 0;
++            if (madr != lastMadr) { ++call; lastMadr = madr; }
++            hist[hpos++ & 63] = {tadr, madr, chcr, tag, call};
++            const bool anom = id == 2u || id == 5u || id == 6u || (id == 0u && qwc == 0u);
++            if (diag && anom && ++nAnom <= 6)
++            {
++                std::fprintf(stderr, "[MFIFO] ANOMALIA #%lu id=%u tadr=%08x; historial:\n", nAnom, id, tadr);
++                for (unsigned k = 0; k < 64; ++k)
++                {
++                    const H &h = hist[(hpos + k) & 63];
++                    std::fprintf(stderr, "   call=%lu tadr=%08x madr=%08x chcr=%08x tag=%016llx\n", h.call, h.tadr, h.madr, h.chcr,
++                                 (unsigned long long)h.tag);
++                }
++            }
++            if (diag && ((id != 1u && id != 3u && id != 4u && nId[id] <= 30) || (nId[id] % 20000) == 0))
++                std::fprintf(stderr, "[MFIFO] tag id=%u n=%lu tadr=%08x qwc=%x addr=%08x madr=%08x next=%08x\n", id, nId[id], tadr, qwc,
++                             addr, madr, next);
++        }
 +        tadr = next;
 +        if (id == 0u || id == 7u) // refe / end: la cadena de VIF1 acaba aqui
 +        {
 +            ended = true;
 +            break;
++        }
++    }
++    {   // DIAG temporal: VN_MFIFOTRACE=1
++        static const bool diag = std::getenv("VN_MFIFOTRACE") != nullptr;
++        static unsigned long nCall = 0, nStall = 0;
++        ++nCall;
++        const uint32_t tadr0 = wrap(m_ioRegisters[kVif1 + 0x30u]);
++        if (diag && tadr == tadr0 && tadr != madr)
++        {
++            ++nStall;
++            if (nStall <= 40 || (nStall % 5000) == 0)
++            {
++                uint64_t tag = 0, tag2 = 0;
++                if (const uint8_t *tp = phys(tadr, 16)) { std::memcpy(&tag, tp, 8); std::memcpy(&tag2, tp + 8, 8); }
++                std::fprintf(stderr, "[MFIFO] stall#%lu call#%lu chcr=%08x tadr=%08x madr=%08x rbor=%08x rbsr=%08x tag=%016llx %016llx avail=%x\n",
++                             nStall, nCall, chcr, tadr, madr, rbor, rbsr, (unsigned long long)tag, (unsigned long long)tag2,
++                             (madr - tadr) & rbsr);
++            }
 +        }
 +    }
 +    m_ioRegisters[kVif1 + 0x30u] = tadr;
@@ -3661,7 +3798,7 @@ index 37b6a4d..9827691 100644
  void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
  {
      static constexpr uint32_t kDStat = 0x1000E010u;
-@@ -1896,7 +2044,11 @@ void PS2Memory::processPendingTransfers()
+@@ -1896,7 +2093,11 @@ void PS2Memory::processPendingTransfers()
          m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
          m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
      }
@@ -3674,7 +3811,23 @@ index 37b6a4d..9827691 100644
      {
          raiseDStatChannel(1u); // VIF1 channel
          queueCompletedDmacCause(1u);
-@@ -2317,26 +2469,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+@@ -2280,6 +2481,15 @@ int PS2Memory::pollDmaRegisters()
+ 
+ uint32_t PS2Memory::readIORegister(uint32_t address)
+ {
++    if (address == 0x10009030u)
++    {   // DIAG temporal: VN_MFIFOTRACE=1, estado cuando el EE gira leyendo D1_TADR
++        static const bool diag = std::getenv("VN_MFIFOTRACE") != nullptr;
++        static unsigned long nRead = 0;
++        if (diag && (++nRead % 2000000) == 0)
++            std::fprintf(stderr, "[MFIFO] tadr-read#%lu vif1chcr=%08x tadr=%08x sprmadr=%08x sprchcr=%08x dctrl=%08x rbor=%08x rbsr=%08x\n",
++                         nRead, m_ioRegisters[0x10009000u], m_ioRegisters[0x10009030u], m_ioRegisters[0x1000D010u],
++                         m_ioRegisters[0x1000D000u], m_ioRegisters[0x1000E000u], m_ioRegisters[0x1000E050u], m_ioRegisters[0x1000E040u]);
++    }
+     size_t timerIndex = 0u;
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+@@ -2317,26 +2527,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
          return 0u;
      }
  
@@ -3703,7 +3856,7 @@ index 37b6a4d..9827691 100644
      }
  
      if (address == 0x10003020u) // GIF_STAT
-@@ -2542,3 +2677,128 @@ void PS2Memory::clearModifiedFlag(uint32_t address, uint32_t size)
+@@ -2542,3 +2735,128 @@ void PS2Memory::clearModifiedFlag(uint32_t address, uint32_t size)
          }
      }
  }
@@ -3910,7 +4063,7 @@ index 8590f14..2213df1 100644
      data[3] = static_cast<uint8_t>(btns >> 8);
      return true;
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 45cb9d2..b52a832 100644
+index 45cb9d2..82c977a 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -607,7 +607,16 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
@@ -4005,6 +4158,62 @@ index 45cb9d2..b52a832 100644
  
      std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
                << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+@@ -1342,6 +1402,15 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+     }
+ }
+ 
++namespace
++{
++    // Counts EE safe-point yields (generated back edges and guest dispatch). dispatchGuestBranch uses it to tell a
++    // callee that yielded at its own entry PC (a loop whose back edge is the function start) from one that left PC
++    // untouched. Only the EE executor thread touches it. Kept out of the class so the header (included by every
++    // generated file) does not change.
++    uint64_t g_eeYieldCount = 0u;
++}
++
+ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+                                      R5900Context *ctx,
+                                      uint32_t targetPc,
+@@ -1358,6 +1427,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     // this charge bounds straight-line call chains that have no local loop.
+     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+     {
++        ++g_eeYieldCount;
+         return false;
+     }
+ 
+@@ -1396,6 +1466,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+ 
+     RecompiledFunction targetFn = lookupFunction(targetPc);
+     const uint32_t entryPc = ctx->pc;
++    const uint64_t yieldsBefore = g_eeYieldCount;
+     targetFn(rdram, ctx, this);
+ 
+     if (isStopRequested() || ctx->pc == 0u)
+@@ -1403,7 +1474,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    if (ctx->pc == entryPc)
++    // PC still at the entry means either a callee that never touched PC (treat as returned) or a callee that yielded
++    // on a back edge to its own first instruction (e.g. Vampire Night's qword copy loop at 0x1AB0D8). The second case
++    // must resume at the entry: falling through cut the copy short and sent stale scratchpad data to the MFIFO.
++    if (ctx->pc == entryPc && g_eeYieldCount == yieldsBefore)
+     {
+         ctx->pc = fallthroughPc;
+     }
+@@ -2211,7 +2285,10 @@ void PS2Runtime::postEeEvent(EeEvent event)
+ 
+ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+ {
+-    return m_eeScheduler->checkpointDue(cycles);
++    if (!m_eeScheduler->checkpointDue(cycles))
++        return false;
++    ++g_eeYieldCount;
++    return true;
+ }
+ 
+ [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
 diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
 index f872edd..d2f0d23 100644
 --- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
@@ -4124,11 +4333,172 @@ index f872edd..d2f0d23 100644
              }
  
              pos += qwCount * 16;
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index f19e281..a178f15 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -13,6 +13,8 @@
+ #include <filesystem>
+ #include <limits>
+ #include <ps2_log.h>
++#include <chrono>
++namespace { struct Vu1Diag { unsigned long exec=0, resume=0, budget=0, stopped=0, kstart=0, kfin=0, kbytes=0, ended=0; unsigned pcs[8]={}; unsigned npcs=0; } g_vu1diag; }
+ 
+ namespace
+ {
+@@ -919,6 +921,21 @@ void VU1Interpreter::finishXgkick()
+     if (!m_xgkick.active)
+         return;
+ 
++    ++g_vu1diag.kfin; g_vu1diag.kbytes += m_xgkick.totalBytes;
++    {
++        static const bool diag = std::getenv("VN_VU1STAT") != nullptr;
++        static unsigned long nDump = 0;
++        if (diag && m_xgkick.totalBytes >= 64u && (++nDump <= 6 || (nDump % 50000) == 0))
++        {
++            std::fprintf(stderr, "[XGKICK] #%lu src=%x bytes=%u:", nDump, m_xgkick.sourceAddress, m_xgkick.totalBytes);
++            for (uint32_t o = 0; o < std::min<uint32_t>(m_xgkick.totalBytes, 160u); o += 8)
++            {
++                uint64_t v; std::memcpy(&v, m_xgkick.packet.data() + o, 8);
++                std::fprintf(stderr, "%s%016llx", (o % 16) ? " " : " | ", (unsigned long long)v);
++            }
++            std::fprintf(stderr, "\n");
++        }
++    }
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+@@ -932,6 +949,7 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
+         return;
+ 
+     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
++    ++g_vu1diag.kstart;
+     m_xgkick = {};
+     m_xgkick.active = true;
+     m_xgkick.sourceAddress = sourceAddress;
+@@ -1590,6 +1608,12 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
+                              uint32_t startPC, uint32_t top, uint32_t itop,
+                              uint32_t maxCycles)
+ {
++    ++g_vu1diag.exec;
++    {
++        bool found = false;
++        for (unsigned k = 0; k < g_vu1diag.npcs; ++k) found |= g_vu1diag.pcs[k] == startPC;
++        if (!found && g_vu1diag.npcs < 8) g_vu1diag.pcs[g_vu1diag.npcs++] = startPC;
++    }
+     resetScheduler();
+     m_state.pc = startPC & microAddressMask();
+     m_state.ebit = false;
+@@ -1605,7 +1629,43 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
+     m_state.vf[0][1] = 0.0f;
+     m_state.vf[0][2] = 0.0f;
+     m_state.vf[0][3] = 1.0f;
++    static const bool diagCull = std::getenv("VN_VU1CULL") != nullptr;
++    static unsigned long nCull = 0;
++    const bool logCull = diagCull && m_unit == Unit::VU1 && startPC == 0u && (++nCull % 4000u) == 1u;
++    if (logCull)
++    {
++        auto q = [&](uint32_t i) { const float *f = reinterpret_cast<const float *>(vuData + ((i * 16u) % dataSize)); return f; };
++        std::fprintf(stderr, "[VU1CULL] n=%lu top=%u\n", nCull, top);
++        for (int r = 16; r <= 19; ++r)
++            std::fprintf(stderr, "   vf%d = %g %g %g %g\n", r, m_state.vf[r][0], m_state.vf[r][1], m_state.vf[r][2], m_state.vf[r][3]);
++        const uint32_t idx[] = {top, 24u, 1004u, 1005u, 997u};
++        for (uint32_t i : idx)
++        { const float *f = q(i); std::fprintf(stderr, "   mem[%u] = %g %g %g %g (i %d %d %d %d)\n", i, f[0], f[1], f[2], f[3],
++              reinterpret_cast<const int32_t *>(f)[0], reinterpret_cast<const int32_t *>(f)[1], reinterpret_cast<const int32_t *>(f)[2], reinterpret_cast<const int32_t *>(f)[3]); }
++    }
++    static unsigned long nM8 = 0;
++    if (diagCull && m_unit == Unit::VU1 && startPC == 0x40u && (++nM8 % 300u) == 1u)
++    {
++        std::fprintf(stderr, "[VU1M8] n=%lu top=%u\n", nM8, top);
++        for (uint32_t i = 0; i < 11u; ++i)
++        {
++            const float *f = reinterpret_cast<const float *>(vuData + (((top + i) * 16u) % dataSize));
++            std::fprintf(stderr, "   tops+%u = %g %g %g %g\n", i, f[0], f[1], f[2], f[3]);
++        }
++        if (memory && memory->getRDRAM())
++        {
++            if (const char *dumpPath = std::getenv("VN_RAMDUMP"))
++                if (FILE *f = std::fopen(dumpPath, "wb")) { std::fwrite(memory->getRDRAM(), 1, 32u * 1024u * 1024u, f); std::fclose(f); }
++        }
++    }
+     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
++    if (logCull)
++    {
++        const int32_t *r = reinterpret_cast<const int32_t *>(vuData + 997u * 16u);
++        std::fprintf(stderr, "   despues: mem[997] = %d %d %d %d vf24 = %g %g %g %g vf01 = %g %g %g %g\n", r[0], r[1], r[2], r[3],
++                     m_state.vf[24][0], m_state.vf[24][1], m_state.vf[24][2], m_state.vf[24][3],
++                     m_state.vf[1][0], m_state.vf[1][1], m_state.vf[1][2], m_state.vf[1][3]);
++    }
+ }
+ 
+ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
+@@ -1835,4 +1895,30 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     m_state.cycles = m_cycle;
+     if (useVuRounding && previousRoundingMode != -1)
+         std::fesetround(previousRoundingMode);
++    {   // DIAG temporal: VN_VU1STAT=1
++        static const bool diag = std::getenv("VN_VU1STAT") != nullptr;
++        if (programEnded) ++g_vu1diag.ended; else if (m_stopRequested) ++g_vu1diag.stopped; else ++g_vu1diag.budget;
++        static auto t0 = std::chrono::steady_clock::now();
++        const auto now = std::chrono::steady_clock::now();
++        if (diag && now - t0 > std::chrono::seconds(2))
++        {
++            t0 = now;
++            std::fprintf(stderr, "[VU1STAT] exec=%lu ended=%lu budget=%lu stopped=%lu stopReq=%d xgk start=%lu fin=%lu bytes=%lu pcs:",
++                         g_vu1diag.exec, g_vu1diag.ended, g_vu1diag.budget, g_vu1diag.stopped, (int)m_stopRequested,
++                         g_vu1diag.kstart, g_vu1diag.kfin, g_vu1diag.kbytes);
++            for (unsigned k = 0; k < g_vu1diag.npcs; ++k) std::fprintf(stderr, " %x", g_vu1diag.pcs[k]);
++            std::fprintf(stderr, "\n");
++            if (const char *dir = std::getenv("VN_VU1DUMP"))
++            {
++                static unsigned nDump = 0;
++                char path[1024];
++                std::snprintf(path, sizeof(path), "%s/vu1code_%03u.bin", dir, nDump);
++                if (FILE *f = std::fopen(path, "wb")) { std::fwrite(vuCode, 1, codeSize, f); std::fclose(f); }
++                std::snprintf(path, sizeof(path), "%s/vu1data_%03u.bin", dir, nDump);
++                if (FILE *f = std::fopen(path, "wb")) { std::fwrite(vuData, 1, dataSize, f); std::fclose(f); }
++                ++nDump;
++            }
++            g_vu1diag = {};
++        }
++    }
+ }
 diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
-index 463b6cf..7cb4f34 100644
+index 463b6cf..a859e3a 100644
 --- a/ps2xTest/src/code_generator_tests.cpp
 +++ b/ps2xTest/src/code_generator_tests.cpp
-@@ -1719,6 +1719,43 @@ void register_code_generator_tests()
+@@ -1464,6 +1464,29 @@ void register_code_generator_tests()
+             t.IsTrue(out.find("ctx->vi[20]") == std::string::npos, "S2 VLQI must not use rs(format) as VI index");
+         });
+ 
++        tc.Run("VU0 S2 VSQI/VSQD store fs (rd) through it (rt)", [](TestCase &t) {
++            // vsqi.xyzw $vf28, ($vi13++) = 0x4bede37d: fs=28 (bits 11-15), it=13 (bits 16-20).
++            for (uint32_t op : {static_cast<uint32_t>(VU0_S2_VSQI), static_cast<uint32_t>(VU0_S2_VSQD)})
++            {
++                Instruction inst{};
++                inst.opcode = OPCODE_COP2;
++                inst.rs = COP2_CO | 0xF;
++                inst.rt = 13;
++                inst.rd = 28;
++                inst.function = 0x3C;
++                inst.vectorInfo.vectorField = 0xF;
++                inst.raw = (((op >> 2) & 0x1F) << 6) | (op & 0x3);
++
++                CodeGenerator gen({}, {});
++                std::string out = gen.translateInstruction(inst);
++
++                t.IsTrue(out.find("ctx->vi[13]") != std::string::npos, "VSQI/VSQD VI base must come from rt (it)");
++                t.IsTrue(out.find("ctx->vu0_vf[28]") != std::string::npos, "VSQI/VSQD stored VF must come from rd (fs)");
++                t.IsTrue(out.find("ctx->vi[28]") == std::string::npos, "VSQI/VSQD must not use fs as VI index");
++                t.IsTrue(out.find("ctx->vu0_vf[13]") == std::string::npos, "VSQI/VSQD must not store it as VF");
++            }
++        });
++
+         tc.Run("JAL to known function emits call and check", [](TestCase &t) {
+             Function func;
+             func.name = "jal_test";
+@@ -1719,6 +1742,43 @@ void register_code_generator_tests()
              t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
          });
  
