@@ -794,7 +794,7 @@ index b32e44a..072e343 100644
  
      void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
-index aed4cb5..793c4e6 100644
+index aed4cb5..e95f710 100644
 --- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
 @@ -17,7 +17,8 @@ namespace ps2_stubs
@@ -807,7 +807,43 @@ index aed4cb5..793c4e6 100644
          }
  
          uint64_t makeClearXyz(int32_t x, int32_t y)
-@@ -590,80 +591,59 @@ namespace ps2_stubs
+@@ -51,6 +52,35 @@ namespace ps2_stubs
+             clear.testb = {restoreTest, testReg};
+         }
+ 
++        // Igual que sceGsSetDefDispEnv de libgraph (VN 0x152C40): PMODE=0x66 (solo circuito 2), SMODE2 segun gparam
++        // (entrelazado: 3 en campo / 1 en frame; progresivo: 2), DISPFB con FBP=0, y DISPLAY con el origen y la
++        // ampliacion del modo de video. En entrelazado por campo (FFMD=1) DH = 2*h-1: el CRTC muestra cada linea del
++        // buffer de h lineas en los dos campos. Si omode no es NTSC (2) ni PAL (3) el real no toca DISPLAY.
++        void seedLibgraphDispEnv(GsDispEnvMem &env, uint32_t psm, int32_t w, int32_t h, int32_t dx, int32_t dy)
++        {
++            const bool interlace = g_gparam.interlace != 0u;
++            const bool field = g_gparam.ffmode != 0u;
++            env.pmode = 0x66u;
++            env.smode2 = interlace ? (field ? 3u : 1u) : 2u;
++            env.dispfb = (static_cast<uint64_t>(psm & 0xFu) << 15) |
++                         (static_cast<uint64_t>(((w + 63) >> 6) & 0x3F) << 9);
++            if (w > 0 && (g_gparam.omode == 2u || g_gparam.omode == 3u))
++            {
++                const bool pal = g_gparam.omode == 3u;
++                const int32_t mag = (0x9FF + w) / w;
++                const int32_t baseX = pal ? 0x290 : 0x27C;
++                const int32_t baseY = pal ? (interlace ? 0x48 : 0x24) : (interlace ? 0x32 : 0x19);
++                const int32_t dh = (interlace && field) ? (h * 2 - 1) : (h - 1);
++                env.display = makeDisplay(static_cast<uint32_t>(baseX + dx * mag),
++                                          static_cast<uint32_t>(dy + baseY),
++                                          static_cast<uint32_t>(mag - 1),
++                                          0u,
++                                          static_cast<uint32_t>(mag * w - 1),
++                                          static_cast<uint32_t>(dh));
++            }
++            env.bgcolor = 0u;
++        }
++
+         bool hasSeededGsClearPacket(const GsClearMem &clear)
+         {
+             return clear.rgbaq.reg == GS_REG_RGBAQ &&
+@@ -590,80 +620,59 @@ namespace ps2_stubs
          setReturnU32(ctx, terminatePacketBuilderState(rdram, ctx, runtime));
      }
  
@@ -923,7 +959,7 @@ index aed4cb5..793c4e6 100644
          setReturnS32(ctx, 0);
      }
  
-@@ -802,51 +782,16 @@ namespace ps2_stubs
+@@ -802,51 +811,16 @@ namespace ps2_stubs
              g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
              g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
              writeGsGParamToScratch(runtime);
@@ -982,7 +1018,7 @@ index aed4cb5..793c4e6 100644
              }
          }
  
-@@ -943,10 +888,12 @@ namespace ps2_stubs
+@@ -943,10 +917,12 @@ namespace ps2_stubs
          uint32_t psm = getRegU32(ctx, 5);
          uint32_t w = getRegU32(ctx, 6);
          uint32_t h = getRegU32(ctx, 7);
@@ -999,22 +1035,32 @@ index aed4cb5..793c4e6 100644
  
          if (w == 0u)
          {
-@@ -962,7 +909,9 @@ namespace ps2_stubs
-         const uint64_t smode2 =
-             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
-             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
+@@ -958,12 +934,7 @@ namespace ps2_stubs
+         }
+ 
+         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
+-        const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
+-        const uint64_t smode2 =
+-            (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
+-            (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
 -        const uint64_t dispfb = makeDispFb(0u, fbw, psm, 0u, 0u);
+-        const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
 +        const uint32_t fbp1 = fbw * ((h + 31u) / 32u);
-+        const uint64_t dispfb = makeDispFb(fbp1, fbw, psm, 0u, 0u);
-+        const uint64_t dispfb1 = makeDispFb(0u, fbw, psm, 0u, 0u);
-         const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
  
          const int32_t drawWidth = static_cast<int32_t>(w);
-@@ -982,11 +931,20 @@ namespace ps2_stubs
-         db.disp[0].display = display;
-         db.disp[0].bgcolor = 0u;
+         const int32_t drawHeight = static_cast<int32_t>(h);
+@@ -976,17 +947,22 @@ namespace ps2_stubs
+         }
+ 
+         GsDBuffMem db{};
+-        db.disp[0].pmode = pmode;
+-        db.disp[0].smode2 = smode2;
+-        db.disp[0].dispfb = dispfb;
+-        db.disp[0].display = display;
+-        db.disp[0].bgcolor = 0u;
++        seedLibgraphDispEnv(db.disp[0], psm, drawWidth, drawHeight, 0, 0);
          db.disp[1] = db.disp[0];
-+        db.disp[1].dispfb = dispfb1;
++        db.disp[0].dispfb |= fbp1 & 0x1FFu; // se muestra fbp1 mientras se dibuja en 0, y al reves con disp[1]
  
 -        db.giftag0 = {makeGiftagAplusD(14u), 0x0E0E0E0E0E0E0E0EULL};
 +        // Como libgraph (0x153400): giftag A+D con NLOOP=8 (sceGsDrawEnv1) o 14 si clear != 0, porque entonces le sigue el
@@ -1033,7 +1079,35 @@ index aed4cb5..793c4e6 100644
  
          if (!writeGsDBuff(rdram, envAddr, db))
          {
-@@ -1105,8 +1063,68 @@ namespace ps2_stubs
+@@ -1011,11 +987,22 @@ namespace ps2_stubs
+         if (h == 0)
+             h = 448;
+ 
+-        uint32_t fbw = (w + 63) / 64;
+-        uint64_t dispfb = makeDispFb(0, fbw, psm, 0, 0);
+-        uint64_t display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
+-
+-        writeGsDispEnv(rdram, envAddr, display, dispfb);
++        // Los argumentos son short (sll/sra 16 en el real): VN llama con dx/dy de nlSetDisplayOffset.
++        uint8_t *ptr = getMemPtr(rdram, envAddr);
++        if (!ptr)
++        {
++            setReturnS32(ctx, -1);
++            return;
++        }
++        GsDispEnvMem env{};
++        std::memcpy(&env, ptr, sizeof(env));
++        seedLibgraphDispEnv(env,
++                            psm,
++                            static_cast<int16_t>(w & 0xFFFFu),
++                            static_cast<int16_t>(h & 0xFFFFu),
++                            static_cast<int16_t>(dx & 0xFFFFu),
++                            static_cast<int16_t>(dy & 0xFFFFu));
++        std::memcpy(ptr, &env, sizeof(env));
+         setReturnS32(ctx, 0);
+     }
+ 
+@@ -1105,8 +1092,68 @@ namespace ps2_stubs
          setReturnS32(ctx, 8);
      }
  
@@ -1102,7 +1176,7 @@ index aed4cb5..793c4e6 100644
          uint32_t imgAddr = getRegU32(ctx, 4);
          const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
  
-@@ -1123,11 +1141,6 @@ namespace ps2_stubs
+@@ -1123,11 +1170,6 @@ namespace ps2_stubs
          setReturnS32(ctx, 0);
      }
  
@@ -1114,7 +1188,7 @@ index aed4cb5..793c4e6 100644
      void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
      {
          const uint32_t envAddr = getRegU32(ctx, 4);
-@@ -1199,13 +1212,16 @@ namespace ps2_stubs
+@@ -1199,13 +1241,16 @@ namespace ps2_stubs
          }
  
          applyGsDispEnv(runtime, db.disp[which]);
@@ -1206,10 +1280,31 @@ index 5110ee2..a57556d 100644
      }
  
 diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
-index f0ad507..0c2ce98 100644
+index f0ad507..eafcbee 100644
 --- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
-@@ -535,6 +535,9 @@ void GSCpuBackend::ResetUnlocked()
+@@ -410,6 +410,20 @@ namespace
+         }
+     }
+ 
++    // Entrelazado con FFMD=1 (campo): DISPLAY.DH cuenta las lineas de los dos campos, pero cada campo lee las mismas
++    // (DH+1)/2 lineas seguidas del framebuffer (PCSX2 tambien divide la altura). En pantalla cada linea ocupa dos.
++    void applyFieldLineDoubling(std::vector<uint8_t> &pixels, uint32_t width, uint32_t sourceHeight)
++    {
++        if (pixels.empty() || width == 0u || sourceHeight == 0u || sourceHeight * 2u > kHostFrameHeight)
++            return;
++        for (uint32_t y = sourceHeight; y-- > 0u;)
++        {
++            const uint8_t *src = pixels.data() + y * kHostFrameWidth * 4u;
++            std::memmove(pixels.data() + (2u * y + 1u) * kHostFrameWidth * 4u, src, width * 4u);
++            std::memmove(pixels.data() + (2u * y) * kHostFrameWidth * 4u, src, width * 4u);
++        }
++    }
++
+     void normalizePresentationAlpha(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height)
+     {
+         for (uint32_t y = 0; y < height; ++y)
+@@ -535,6 +549,9 @@ void GSCpuBackend::ResetUnlocked()
      m_clut.fill(0u);
      m_clutCbp.fill(0u);
      m_texturePageCache.Invalidate();
@@ -1219,7 +1314,7 @@ index f0ad507..0c2ce98 100644
      m_transfer = {};
      m_transfer.direction = 3u;
      m_transferState = {};
-@@ -548,9 +551,57 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
+@@ -548,9 +565,57 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
      std::lock_guard<std::mutex> lock(m_mutex);
      if (!m_vram || batch.vertexCount == 0u)
          return;
@@ -1277,7 +1372,7 @@ index f0ad507..0c2ce98 100644
  void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
  {
      std::lock_guard<std::mutex> lock(m_mutex);
-@@ -611,7 +662,8 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
+@@ -611,7 +676,8 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
  
          if (tex0.csm == 0u)
          {
@@ -1287,7 +1382,7 @@ index f0ad507..0c2ce98 100644
              sourceX = sourceIndex & 0x0Fu;
              sourceY = sourceIndex >> 4u;
          }
-@@ -1464,6 +1516,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
+@@ -1464,6 +1530,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
  {
      std::lock_guard<std::mutex> lock(m_mutex);
      m_transfer = command;
@@ -1295,7 +1390,7 @@ index f0ad507..0c2ce98 100644
      m_transferState.x = command.trxpos.dsax;
      m_transferState.y = command.trxpos.dsay;
      m_transferState.totalPixels = static_cast<uint32_t>(command.trxreg.rrw) * static_cast<uint32_t>(command.trxreg.rrh);
-@@ -1482,6 +1535,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+@@ -1482,6 +1549,7 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
      std::lock_guard<std::mutex> lock(m_mutex);
      if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
          return;
@@ -1303,7 +1398,7 @@ index f0ad507..0c2ce98 100644
      if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
          return;
  
-@@ -1851,6 +1905,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
+@@ -1851,6 +1919,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
      SnapshotVram(snapshot);
      if (snapshot.empty())
          return {};
@@ -1311,6 +1406,43 @@ index f0ad507..0c2ce98 100644
  
      thread_local GSCpuBackend snapshotBackend;
      snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
+@@ -1871,6 +1940,12 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
+     uint32_t width1 = 0u, height1 = 0u, width2 = 0u, height2 = 0u;
+     decodeDisplaySize(request.display1, width1, height1);
+     decodeDisplaySize(request.display2, width2, height2);
++    const bool fieldLines = smode2.interlaced && smode2.frameMode; // bit FFMD=1
++    if (fieldLines)
++    {
++        height1 = std::max<uint32_t>(1u, height1 / 2u);
++        height2 = std::max<uint32_t>(1u, height2 / 2u);
++    }
+     const bool valid1 = pmode.enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
+     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
+     if (!valid1 && !valid2)
+@@ -1958,6 +2033,11 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
+             normalizePresentationAlpha(result.pixels, result.width, result.height);
+             if (fieldMode)
+                 applyFieldPresentation(result.pixels, result.width, result.height, oddField);
++            if (fieldLines && result.height * 2u <= kHostFrameHeight)
++            {
++                applyFieldLineDoubling(result.pixels, result.width, result.height);
++                result.height *= 2u;
++            }
+             result.displayFbp = displayFrame1.fbp;
+             result.sourceFbp = selected1.fbp;
+             return result;
+@@ -1974,6 +2054,11 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
+     if (fieldMode)
+         applyFieldPresentation(result.pixels, result.width, result.height, oddField);
+     normalizePresentationAlpha(result.pixels, result.width, result.height);
++    if (fieldLines && result.height * 2u <= kHostFrameHeight)
++    {
++        applyFieldLineDoubling(result.pixels, result.width, result.height);
++        result.height *= 2u;
++    }
+     result.displayFbp = displayFrame.fbp;
+     result.sourceFbp = selected.fbp;
+     return result;
 diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 index 9281d5f..e3b2630 100644
 --- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
